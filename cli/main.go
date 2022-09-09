@@ -8,7 +8,7 @@ import (
 
 func main() {
 	hub := chat.NewHub()
-	go hub.run()
+	go hub.Run()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		chat.ServeWs(hub, w, r)

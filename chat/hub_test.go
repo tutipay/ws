@@ -11,7 +11,7 @@ import (
 
 func Test_serveWs(t *testing.T) {
 	hub := NewHub()
-	go hub.run()
+	go hub.Run()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ServeWs(hub, w, r)

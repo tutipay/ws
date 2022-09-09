@@ -52,7 +52,7 @@ func NewHub() *Hub {
 	}
 }
 
-func (h *Hub) run() {
+func (h *Hub) Run() {
 	for {
 		select {
 		// This registers a new web socket connect client to our hub.

@@ -3,7 +3,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/tutipay/chat"
+	"github.com/tutipay/ws/chat"
 )
 
 func main() {

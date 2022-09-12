@@ -92,25 +92,26 @@ func (c *Client) writePump() {
 			// Commenting this line will allow the program to not close
 			// but at the same time, this is the base we need as to how we send a message to a
 			// specific client (or user)
+			mtx.Lock()
 			connClients["69"].WriteMessage(websocket.TextMessage, bytes.ToUpper(message))
+			mtx.Unlock()
+			// w, err := c.conn.NextWriter(websocket.TextMessage)
+			// if err != nil {
+			// 	return
+			// }
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
+			// w.Write(message)
 
-			w.Write(message)
+			// // Add queued chat messages to the current websocket message.
+			// n := len(c.send)
+			// for i := 0; i < n; i++ {
+			// 	w.Write(newline)
+			// 	w.Write(<-c.send)
+			// }
 
-			// Add queued chat messages to the current websocket message.
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write(newline)
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
+			// if err := w.Close(); err != nil {
+			// 	return
+			// }
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

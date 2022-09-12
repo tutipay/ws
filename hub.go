@@ -3,6 +3,7 @@ package chat
 import (
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -83,4 +84,6 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	go client.readPump()
 }
 
+// mtx is a package variable to synchornize the write access to the specific client of interest.
+var mtx sync.Mutex
 var connClients = make(map[string]*websocket.Conn)

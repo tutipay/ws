@@ -3,6 +3,7 @@ package chat
 import (
 	"bytes"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,17 +31,19 @@ var (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true }, // TODO: This is dangerous, it must be changed
 }
 
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
+	ID  string
 	hub *Hub
 
 	// The websocket connection.
 	conn *websocket.Conn
 
 	// Buffered channel of outbound messages.
-	send chan []byte
+	send chan *Message
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -48,7 +51,7 @@ type Client struct {
 // The application runs readPump in a per-connection goroutine. The application
 // ensures that there is at most one reader on a connection by executing all
 // reads from this goroutine.
-func (c *Client) readPump() {
+func (c *Client) readPump(room *Room) {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close()
@@ -57,14 +60,20 @@ func (c *Client) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, message, err := c.conn.ReadMessage()
+		_, messageText, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
 		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+		messageText = bytes.TrimSpace(bytes.Replace(messageText, newline, space, -1))
+
+		message := &Message{
+			text: messageText,
+			from: room.senderID,
+			to:   room.receiverID,
+		}
 		c.hub.broadcast <- message
 	}
 }
@@ -74,7 +83,7 @@ func (c *Client) readPump() {
 // A goroutine running writePump is started for each connection. The
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
-func (c *Client) writePump() {
+func (c *Client) writePump(room *Room) {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
@@ -92,9 +101,7 @@ func (c *Client) writePump() {
 			// Commenting this line will allow the program to not close
 			// but at the same time, this is the base we need as to how we send a message to a
 			// specific client (or user)
-			mtx.Lock()
-			connClients["69"].WriteMessage(websocket.TextMessage, bytes.ToUpper(message))
-			mtx.Unlock()
+			c.conn.WriteMessage(websocket.TextMessage, message.text)
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

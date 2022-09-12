@@ -16,6 +16,12 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "69.html")
 		return
 	}
+
+	if r.URL.Path == "/420" {
+		http.ServeFile(w, r, "420.html")
+		return
+	}
+
 	if r.URL.Path != "/" {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return

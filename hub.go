@@ -3,15 +3,9 @@ package chat
 import (
 	"log"
 	"net/http"
-	"sync"
 
 	"github.com/gorilla/websocket"
 )
-
-// var accept = make(chan chatMessage, 256)
-// var upgrader = websocket.Upgrader{} // use default options
-// var upgrader2 = websocket.Upgrader{}
-// var xbroadcast = make(chan []byte)
 
 // Hub maintains the set of active clients and broadcasts messages to the
 // clients.
@@ -20,7 +14,7 @@ type Hub struct {
 	clients map[*Client]bool
 
 	// Inbound messages from the clients.
-	broadcast chan []byte
+	broadcast chan *Message
 
 	// Register requests from the clients.
 	register chan *Client
@@ -31,7 +25,7 @@ type Hub struct {
 
 func NewHub() *Hub {
 	return &Hub{
-		broadcast:  make(chan []byte),
+		broadcast:  make(chan *Message),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
@@ -50,11 +44,13 @@ func (h *Hub) Run() {
 			}
 		case message := <-h.broadcast:
 			for client := range h.clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(h.clients, client)
+				if message.to == client.ID {
+					select {
+					case client.send <- message:
+					default:
+						close(client.send)
+						delete(h.clients, client)
+					}
 				}
 			}
 		}
@@ -69,21 +65,20 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
+	senderID := r.URL.Query().Get("sender")
+	receiverID := r.URL.Query().Get("receiver")
 
-	if id != "" {
-		log.Printf("the id is: %s", id)
-		connClients[id] = conn
-	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	connClients[senderID] = conn
+
+	client := &Client{ID: senderID, hub: hub, conn: conn, send: make(chan *Message, 256)}
 	client.hub.register <- client
+
+	room := &Room{ID: "tempID", senderID: senderID, receiverID: receiverID}
 
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
-	go client.writePump()
-	go client.readPump()
+	go client.writePump(room)
+	go client.readPump(room)
 }
 
-// mtx is a package variable to synchornize the write access to the specific client of interest.
-var mtx sync.Mutex
 var connClients = make(map[string]*websocket.Conn)

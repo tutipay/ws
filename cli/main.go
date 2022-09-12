@@ -3,9 +3,12 @@ package main
 import (
 	"log"
 	"net/http"
+	"sync"
 
 	chat "github.com/tutipay/ws"
 )
+
+var m sync.Mutex
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
 	log.Println(r.URL)

@@ -71,8 +71,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	id := r.URL.Query().Get("id")
 
+	log.Printf("the id is: %s", id)
 	if id != "" {
-		log.Printf("the id is: %s", id)
 		connClients[id] = conn
 	}
 	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}

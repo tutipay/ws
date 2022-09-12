@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net/http"
 	"sync"
 
@@ -11,11 +10,6 @@ import (
 var m sync.Mutex
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
-	log.Println(r.URL)
-	if r.URL.Path == "/69" {
-		http.ServeFile(w, r, "69.html")
-		return
-	}
 	if r.URL.Path != "/" {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return

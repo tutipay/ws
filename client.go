@@ -93,7 +93,11 @@ func (c *Client) writePump() {
 			// but at the same time, this is the base we need as to how we send a message to a
 			// specific client (or user)
 			mtx.Lock()
-			connClients["69"].WriteMessage(websocket.TextMessage, bytes.ToUpper(message))
+			if connClients["69"] != nil {
+				connClients["420"].WriteMessage(websocket.TextMessage, bytes.ToUpper(message))
+			} else {
+				connClients["69"].WriteMessage(websocket.TextMessage, bytes.ToUpper(message))
+			}
 			mtx.Unlock()
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))

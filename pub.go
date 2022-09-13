@@ -1,12 +1,10 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 
 	"github.com/go-redis/redis/v9"
 )
@@ -41,10 +39,10 @@ func CashoutPub(r *redis.Client) {
 			log.Printf("Error in marshaling response: %v", err)
 			continue
 		}
-		_, err = http.Post(message.Endpoint, "application/json", bytes.NewBuffer(data))
-		if err != nil {
-			log.Printf("Error in response: %v", err)
-		}
+		log.Printf("the data is: %v", data)
+		// _, err = http.Post(message.Endpoint, "application/json", bytes.NewBuffer(data))
+		// Maybe send a push notification message here in case we need to tell the user they have a message
+
 		fmt.Println(msg.Channel, msg.Payload)
 	}
 }

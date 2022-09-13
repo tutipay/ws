@@ -99,9 +99,7 @@ func (c *Client) writePump(room *Room) {
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			// Commenting this line will allow the program to not close
-			// but at the same time, this is the base we need as to how we send a message to a
-			// specific client (or user)
+			// FIXME #5(adonese)
 			c.conn.WriteMessage(websocket.TextMessage, message.text)
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))

@@ -44,6 +44,11 @@ func (h *Hub) Run() {
 			}
 		case message := <-h.broadcast:
 			for client := range h.clients {
+				// A message contains .to and .from fields in addition to the content
+				// we could use that to match against the specific client ID we already have
+				// and only send to the one of interest. There are other cases we need to check for:
+				// - if the client.ID doesn't exist (not connected, or disconnected)
+				// - handle delivery failures as well as storing the message itself in a database
 				if message.to == client.ID {
 					select {
 					case client.send <- message:

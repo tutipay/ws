@@ -69,6 +69,7 @@ func (c *Client) readPump(room *Room) {
 		}
 		messageText = bytes.TrimSpace(bytes.Replace(messageText, newline, space, -1))
 
+		// Populate message with corresponding data (inc: text, from and to) fields
 		message := &Message{
 			text: messageText,
 			from: room.senderID,

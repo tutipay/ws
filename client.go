@@ -2,14 +2,12 @@ package chat
 
 import (
 	"bytes"
-	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/go-redis/redis/v9"
 	"github.com/gorilla/websocket"
+	"github.com/jmoiron/sqlx"
 )
 
 const (
@@ -38,6 +36,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // Client is a middleman between the websocket connection and the hub.
+// It is important to note that Client should be also
 type Client struct {
 	ID  string
 	hub *Hub
@@ -48,8 +47,8 @@ type Client struct {
 	// Buffered channel of outbound messages.
 	send chan *Message
 
-	// Redis client
-	redis *redis.Client
+	// Chat instance to persist the chats
+	db *sqlx.DB
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -77,9 +76,9 @@ func (c *Client) readPump(room *Room) {
 
 		// Populate message with corresponding data (inc: text, from and to) fields
 		message := &Message{
-			text: messageText,
-			from: room.senderID,
-			to:   room.receiverID,
+			Text: string(messageText),
+			From: room.senderID,
+			To:   room.receiverID,
 		}
 		c.hub.broadcast <- message
 	}
@@ -106,33 +105,10 @@ func (c *Client) writePump(room *Room) {
 				return
 			}
 			// FIXME #5(adonese)
-			c.conn.WriteMessage(websocket.TextMessage, message.text)
-
-			// Publish incoming messages to a specific redis pub-sub channel
-
-			{
-				ctx := context.Background()
-				// Ok, should we send to a specific room / channel, or just send to a generic one and parse later?
-				pubsub := c.redis.Subscribe(ctx, fmt.Sprintf("%d-%d_chan", message.from, message.to))
-
-				// Wait for confirmation that subscription is created before publishing anything.
-				_, err := pubsub.Receive(ctx)
-				if err != nil {
-					log.Printf("Error in pubsub: %v", err)
-
-				}
-
-				// Publish a message.
-				err = c.redis.Publish(ctx, fmt.Sprintf("%d-%d_chan", message.from, message.to), message).Err() // So, we are currently just pushing to the data
-				if err != nil {
-					log.Printf("Error in pubsub: %v", err)
-
-				}
-
-				time.AfterFunc(time.Second, func() {
-					// When pubsub is closed channel is closed too.
-					_ = pubsub.Close()
-				})
+			c.conn.WriteMessage(websocket.TextMessage, []byte(message.Text))
+			if c.db != nil {
+				// We can safely store data into db at this stage
+				message.insert(c.db)
 			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))

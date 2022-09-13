@@ -49,7 +49,7 @@ func (h *Hub) Run() {
 				// and only send to the one of interest. There are other cases we need to check for:
 				// - if the client.ID doesn't exist (not connected, or disconnected)
 				// - handle delivery failures as well as storing the message itself in a database
-				if message.to == client.ID {
+				if message.To == client.ID {
 					select {
 					case client.send <- message:
 					default:
@@ -84,6 +84,31 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// new goroutines.
 	go client.writePump(room)
 	go client.readPump(room)
+}
+
+//PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
+// Read it.
+func PreviousMessages(chat Message, w http.ResponseWriter, r *http.Request) {
+	senderID := r.URL.Query().Get("sender")
+	if senderID == "" {
+		verr := validationError{Message: "Sender ID is empty", Code: "empty_sender_id"}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(marshal(verr))
+		return
+	}
+	chats, err := getUnreadMessages(senderID, chat.db)
+	if err != nil {
+		verr := validationError{Message: "No previous unread messages", Code: "empty_queue"}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(marshal(verr))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(marshal(chats))
+	// We make all of the messages are read for the `to`
+	chat.readAll(senderID, chat.db)
+	return
 }
 
 var connClients = make(map[string]*websocket.Conn)

@@ -31,15 +31,15 @@
 
         let queryParams = new URLSearchParams(window.location.search);
 
-        let id = queryParams.get("sender");
-        let to = queryParams.get("receiver");
-        console.log("the id is: ", id);
+        let sender = queryParams.get("sender");
+        let receiver = queryParams.get("receiver");
+        console.log("the id is: ", sender);
         if (window["WebSocket"]) {
           conn = new WebSocket(
             "ws://" +
               document.location.host +
               "/ws" +
-              `?sender=${id}&receiver=${to}`
+              `?sender=${sender}&receiver=${receiver}`
           );
           conn.onclose = function (evt) {
             var item = document.createElement("div");

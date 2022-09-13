@@ -2,10 +2,13 @@ package chat
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/go-redis/redis/v9"
 	"github.com/gorilla/websocket"
 )
 
@@ -44,6 +47,9 @@ type Client struct {
 
 	// Buffered channel of outbound messages.
 	send chan *Message
+
+	// Redis client
+	redis *redis.Client
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -101,6 +107,33 @@ func (c *Client) writePump(room *Room) {
 			}
 			// FIXME #5(adonese)
 			c.conn.WriteMessage(websocket.TextMessage, message.text)
+
+			// Publish incoming messages to a specific redis pub-sub channel
+
+			{
+				ctx := context.Background()
+				// Ok, should we send to a specific room / channel, or just send to a generic one and parse later?
+				pubsub := c.redis.Subscribe(ctx, fmt.Sprintf("%d-%d_chan", message.from, message.to))
+
+				// Wait for confirmation that subscription is created before publishing anything.
+				_, err := pubsub.Receive(ctx)
+				if err != nil {
+					log.Printf("Error in pubsub: %v", err)
+
+				}
+
+				// Publish a message.
+				err = c.redis.Publish(ctx, fmt.Sprintf("%d-%d_chan", message.from, message.to), message).Err() // So, we are currently just pushing to the data
+				if err != nil {
+					log.Printf("Error in pubsub: %v", err)
+
+				}
+
+				time.AfterFunc(time.Second, func() {
+					// When pubsub is closed channel is closed too.
+					_ = pubsub.Close()
+				})
+			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

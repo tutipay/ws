@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"log"
 
 	"github.com/jmoiron/sqlx"
@@ -18,6 +19,8 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 
 // Message represents a table of all chat messages that are stored in
 // ws package.
+// We rely on the consumer of the package to provide us with their own database connection client
+// since it doesn't make much since to do that for them.
 type Message struct {
 	ID          int    `db:"id"`
 	From        string `db:"from"`
@@ -25,6 +28,14 @@ type Message struct {
 	Text        string `db:"text"`
 	IsDelivered bool   `db:"is_delivered"`
 	db          *sqlx.DB
+}
+
+// NewMessage creates a new instance of a Message populated with a database
+func NewMessage(db *sqlx.DB) (Message, error) {
+	if db == nil {
+		return Message{}, errors.New("the db client is nil")
+	}
+	return Message{db: db}, nil
 }
 
 func openDb() (*sqlx.DB, error) {
@@ -53,9 +64,9 @@ func (m Message) readAll(mobile string, db *sqlx.DB) error {
 	return nil
 }
 
-func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
+func (m Message) getUnreadMessages(mobile string) ([]Message, error) {
 	var chats []Message
-	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
+	if err := m.db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
 		return nil, err
 	}
 	return chats, nil

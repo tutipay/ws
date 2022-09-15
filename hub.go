@@ -88,7 +88,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 //PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
 // Read it.
-func PreviousMessages(chat Message, w http.ResponseWriter, r *http.Request) {
+func PreviousMessages(msg Message, w http.ResponseWriter, r *http.Request) {
 	senderID := r.URL.Query().Get("sender")
 	if senderID == "" {
 		verr := validationError{Message: "Sender ID is empty", Code: "empty_sender_id"}
@@ -96,7 +96,7 @@ func PreviousMessages(chat Message, w http.ResponseWriter, r *http.Request) {
 		w.Write(marshal(verr))
 		return
 	}
-	chats, err := getUnreadMessages(senderID, chat.db)
+	chats, err := msg.getUnreadMessages(senderID)
 	if err != nil {
 		verr := validationError{Message: "No previous unread messages", Code: "empty_queue"}
 		w.WriteHeader(http.StatusBadRequest)
@@ -106,8 +106,7 @@ func PreviousMessages(chat Message, w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(marshal(chats))
-	// We make all of the messages are read for the `to`
-	chat.readAll(senderID, chat.db)
+	msg.readAll(senderID, msg.db)
 	return
 }
 

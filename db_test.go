@@ -50,9 +50,10 @@ func TestChat_getUnreadMessages(t *testing.T) {
 	}{
 		{"test retrieving", Message{db: testDb}, "091212121", 2},
 	}
+	msg := Message{db: testDb}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := getUnreadMessages(tt.args, testDb)
+			got, err := msg.getUnreadMessages(tt.args)
 			if (err != nil) && len(got) != tt.want {
 				t.Errorf("Chat.getUnreadMessages() error = %v, length %v", err, tt.want)
 				return

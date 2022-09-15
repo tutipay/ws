@@ -26,3 +26,18 @@ func previousMessagesAdapter(msg chat.Hub) gin.HandlerFunc {
 	}
 }
 ```
+
+### How to serve web socket connections
+
+Let's use nginx example, you can find better docs for other web servers.
+
+```nginx
+location /ws {
+     proxy_pass http://localhost:6662/ws;
+     proxy_http_version 1.1;
+     proxy_set_header Upgrade $http_upgrade;
+     proxy_set_header Connection "Upgrade";
+     proxy_set_header Host $host;
+}
+```
+

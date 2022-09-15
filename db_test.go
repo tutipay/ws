@@ -63,7 +63,6 @@ func TestChat_getUnreadMessages(t *testing.T) {
 }
 
 func TestMessage_readAll(t *testing.T) {
-
 	type args struct {
 		mobile string
 		db     *sqlx.DB

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -65,22 +66,28 @@ func (c *Client) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, messageText, err := c.conn.ReadMessage()
+		// The client should send the message as a JSON string that contains the message text as well
+		// as the message metadata through the websocket connection.
+		_, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
 		}
-		messageText = bytes.TrimSpace(bytes.Replace(messageText, newline, space, -1))
+
+		messageJSON = bytes.TrimSpace(bytes.Replace(messageJSON, newline, space, -1))
+
+		var message Message
+
+		if err := json.Unmarshal(messageJSON, &message); err != nil {
+			log.Printf("error: %v", err)
+		}
+		// Note that the `To` and `Text` fields are required and if they are not sent with the message metadata
+		// the application will fail.
 
 		// Populate message with corresponding data (inc: text, from and to) fields
-		message := &Message{
-			Text: string(messageText),
-			From: room.senderID,
-			To:   room.receiverID,
-		}
-		c.hub.broadcast <- message
+		c.hub.broadcast <- &message
 	}
 }
 

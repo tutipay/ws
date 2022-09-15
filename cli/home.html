@@ -51,7 +51,7 @@
             var messages = evt.data.split("\n");
             for (var i = 0; i < messages.length; i++) {
               var item = document.createElement("div");
-              item.innerText = messages[i];
+              item.innerText = JSON.parse(messages[i]).text;
               if (i == 0) {
                 item.innerText = `[Your ID:${clientID}] Rcvd: ${item.innerText}`;
               }

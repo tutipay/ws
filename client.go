@@ -111,8 +111,7 @@ func (c *Client) writePump() {
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			// FIXME #5(adonese)
-			c.conn.WriteMessage(websocket.TextMessage, []byte(message.Text))
+			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
 			if c.db != nil {
 				// We can safely store data into db at this stage
 				message.insert(c.db)

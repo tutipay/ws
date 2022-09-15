@@ -2,13 +2,10 @@ package main
 
 import (
 	"net/http"
-	"sync"
 
 	"github.com/jmoiron/sqlx"
 	chat "github.com/tutipay/ws"
 )
-
-var m sync.Mutex
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -22,6 +19,7 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 	}
 	http.ServeFile(w, r, "home.html")
 }
+
 func main() {
 	hub := chat.NewHub()
 	go hub.Run()

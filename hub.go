@@ -3,8 +3,6 @@ package chat
 import (
 	"log"
 	"net/http"
-
-	"github.com/gorilla/websocket"
 )
 
 // Hub maintains the set of active clients and broadcasts messages to the
@@ -70,33 +68,29 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	senderID := r.URL.Query().Get("sender")
-	receiverID := r.URL.Query().Get("receiver")
+	// We can change this to JSON instead
+	clientID := r.URL.Query().Get("clientID")
 
-	connClients[senderID] = conn
-
-	client := &Client{ID: senderID, hub: hub, conn: conn, send: make(chan *Message, 256)}
+	client := &Client{ID: clientID, hub: hub, conn: conn, send: make(chan *Message, 256)}
 	client.hub.register <- client
-
-	room := &Room{ID: "tempID", senderID: senderID, receiverID: receiverID}
 
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
-	go client.writePump(room)
-	go client.readPump(room)
+	go client.writePump()
+	go client.readPump()
 }
 
-//PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
+// PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
 // Read it.
 func PreviousMessages(msg Message, w http.ResponseWriter, r *http.Request) {
-	senderID := r.URL.Query().Get("sender")
-	if senderID == "" {
-		verr := validationError{Message: "Sender ID is empty", Code: "empty_sender_id"}
+	clientID := r.URL.Query().Get("clientID")
+	if clientID == "" {
+		verr := validationError{Message: "Cliend ID is empty", Code: "empty_cliend_id"}
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write(marshal(verr))
 		return
 	}
-	chats, err := msg.getUnreadMessages(senderID)
+	chats, err := msg.getUnreadMessages(clientID)
 	if err != nil {
 		verr := validationError{Message: "No previous unread messages", Code: "empty_queue"}
 		w.WriteHeader(http.StatusBadRequest)
@@ -106,8 +100,5 @@ func PreviousMessages(msg Message, w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(marshal(chats))
-	msg.readAll(senderID, msg.db)
-	return
+	msg.readAll(clientID, msg.db)
 }
-
-var connClients = make(map[string]*websocket.Conn)

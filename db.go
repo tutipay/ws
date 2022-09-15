@@ -22,11 +22,11 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 // We rely on the consumer of the package to provide us with their own database connection client
 // since it doesn't make much since to do that for them.
 type Message struct {
-	ID          int    `db:"id"`
-	From        string `db:"from"`
-	To          string `db:"to"`
-	Text        string `db:"text"`
-	IsDelivered bool   `db:"is_delivered"`
+	ID          int    `db:"id" json:"id,omitempty"`
+	From        string `db:"from" json:"from,omitempty"`
+	To          string `db:"to" json:"to,omitempty"`
+	Text        string `db:"text" json:"text,omitempty"`
+	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
 	db          *sqlx.DB
 }
 

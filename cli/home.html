@@ -25,21 +25,22 @@
             return false;
           }
           conn.send(msg.value);
+          var value = JSON.parse(msg.value)
+          var item = document.createElement("div");
+          item.innerText = `[Your ID:${clientID}] Sent: ${value.text}`;
+          appendLog(item);
           msg.value = "";
           return false;
         };
 
         let queryParams = new URLSearchParams(window.location.search);
 
-        let sender = queryParams.get("sender");
-        let receiver = queryParams.get("receiver");
-        console.log("the id is: ", sender);
+        let clientID = queryParams.get("clientID");
+        console.log("cliendID is: ", clientID);
+
         if (window["WebSocket"]) {
           conn = new WebSocket(
-            "ws://" +
-              document.location.host +
-              "/ws" +
-              `?sender=${sender}&receiver=${receiver}`
+            `ws://${document.location.host}/ws?clientID=${clientID}`
           );
           conn.onclose = function (evt) {
             var item = document.createElement("div");
@@ -51,6 +52,9 @@
             for (var i = 0; i < messages.length; i++) {
               var item = document.createElement("div");
               item.innerText = messages[i];
+              if (i == 0) {
+                item.innerText = `[Your ID:${clientID}] Rcvd: ${item.innerText}`;
+              }
               appendLog(item);
             }
           };

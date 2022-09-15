@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -56,7 +57,7 @@ type Client struct {
 // The application runs readPump in a per-connection goroutine. The application
 // ensures that there is at most one reader on a connection by executing all
 // reads from this goroutine.
-func (c *Client) readPump(room *Room) {
+func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close()
@@ -65,22 +66,28 @@ func (c *Client) readPump(room *Room) {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, messageText, err := c.conn.ReadMessage()
+		// The client should send the message as a JSON string that contains the message text as well
+		// as the message metadata through the websocket connection.
+		_, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
 		}
-		messageText = bytes.TrimSpace(bytes.Replace(messageText, newline, space, -1))
+
+		messageJSON = bytes.TrimSpace(bytes.Replace(messageJSON, newline, space, -1))
+
+		var message Message
+
+		if err := json.Unmarshal(messageJSON, &message); err != nil {
+			log.Printf("error: %v", err)
+		}
+		// Note that the `To` and `Text` fields are required and if they are not sent with the message metadata
+		// the application will fail.
 
 		// Populate message with corresponding data (inc: text, from and to) fields
-		message := &Message{
-			Text: string(messageText),
-			From: room.senderID,
-			To:   room.receiverID,
-		}
-		c.hub.broadcast <- message
+		c.hub.broadcast <- &message
 	}
 }
 
@@ -89,7 +96,7 @@ func (c *Client) readPump(room *Room) {
 // A goroutine running writePump is started for each connection. The
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
-func (c *Client) writePump(room *Room) {
+func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()

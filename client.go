@@ -114,7 +114,8 @@ func (c *Client) writePump() {
 			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
 			if c.db != nil {
 				// We can safely store data into db at this stage
-				message.insert(c.db)
+				// db is: c.hub.db
+				insert(*message, c.db)
 			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))

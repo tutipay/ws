@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"errors"
 	"log"
 
 	"github.com/jmoiron/sqlx"
@@ -27,15 +26,6 @@ type Message struct {
 	To          string `db:"to" json:"to,omitempty"`
 	Text        string `db:"text" json:"text,omitempty"`
 	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
-	db          *sqlx.DB
-}
-
-// NewMessage creates a new instance of a Message populated with a database
-func NewMessage(db *sqlx.DB) (Message, error) {
-	if db == nil {
-		return Message{}, errors.New("the db client is nil")
-	}
-	return Message{db: db}, nil
 }
 
 func openDb() (*sqlx.DB, error) {
@@ -46,28 +36,4 @@ func openDb() (*sqlx.DB, error) {
 	}
 	db.MustExec(stmt)
 	return db, nil
-}
-
-func (c Message) insert(db *sqlx.DB) error {
-	if _, err := c.db.NamedExec(`INSERT into chats("from", "to", "text") values(:from, :to, :text)`, c); err != nil {
-		log.Printf("the error is: %v", err)
-		return err
-	}
-	return nil
-}
-
-func (m Message) readAll(mobile string, db *sqlx.DB) error {
-	if _, err := db.Exec(`Update chats set is_delivered = 1 where "to" = $1`, mobile); err != nil {
-		log.Printf("the error is: %v", err)
-		return err
-	}
-	return nil
-}
-
-func (m Message) getUnreadMessages(mobile string) ([]Message, error) {
-	var chats []Message
-	if err := m.db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
-		return nil, err
-	}
-	return chats, nil
 }

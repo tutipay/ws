@@ -2,7 +2,8 @@ package chat
 
 import (
 	"log"
-	"net/http"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // Hub maintains the set of active clients and broadcasts messages to the
@@ -19,14 +20,42 @@ type Hub struct {
 
 	// Unregister requests from clients.
 	unregister chan *Client
+
+	// Database reference, we will need to have it down
+	db *sqlx.DB
 }
 
-func NewHub() *Hub {
+func insert(msg Message, db *sqlx.DB) error {
+	if _, err := db.NamedExec(`INSERT into chats("from", "to", "text") values(:from, :to, :text)`, msg); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}
+
+func updateStatus(mobile string, db *sqlx.DB) error {
+	if _, err := db.Exec(`Update chats set is_delivered = 1 where "to" = $1`, mobile); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}
+
+func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
+	var chats []Message
+	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
+		return nil, err
+	}
+	return chats, nil
+}
+
+func NewHub(db *sqlx.DB) *Hub {
 	return &Hub{
 		broadcast:  make(chan *Message),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+		db:         db,
 	}
 }
 
@@ -58,47 +87,4 @@ func (h *Hub) Run() {
 			}
 		}
 	}
-}
-
-// serveWs handles websocket requests from the peer.
-func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	// We can change this to JSON instead
-	clientID := r.URL.Query().Get("clientID")
-
-	client := &Client{ID: clientID, hub: hub, conn: conn, send: make(chan *Message, 256)}
-	client.hub.register <- client
-
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
-	go client.writePump()
-	go client.readPump()
-}
-
-// PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
-// Read it.
-func PreviousMessages(msg Message, w http.ResponseWriter, r *http.Request) {
-	clientID := r.URL.Query().Get("clientID")
-	if clientID == "" {
-		verr := validationError{Message: "Cliend ID is empty", Code: "empty_cliend_id"}
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write(marshal(verr))
-		return
-	}
-	chats, err := msg.getUnreadMessages(clientID)
-	if err != nil {
-		verr := validationError{Message: "No previous unread messages", Code: "empty_queue"}
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write(marshal(verr))
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(marshal(chats))
-	msg.readAll(clientID, msg.db)
 }

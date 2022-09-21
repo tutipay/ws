@@ -88,6 +88,14 @@ func (c *Client) readPump() {
 
 		// Populate message with corresponding data (inc: text, from and to) fields
 		c.hub.broadcast <- &message
+
+		if c.db != nil {
+			// We can safely store data into db at this stage
+			// db is: c.hub.db
+			log.Print("we are in db")
+			insert(message, c.db)
+		}
+
 	}
 }
 
@@ -105,6 +113,7 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
+
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
@@ -112,11 +121,7 @@ func (c *Client) writePump() {
 				return
 			}
 			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
-			if c.db != nil {
-				// We can safely store data into db at this stage
-				// db is: c.hub.db
-				insert(*message, c.db)
-			}
+
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

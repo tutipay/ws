@@ -1,9 +1,9 @@
 package main
 
 import (
+	"log"
 	"net/http"
 
-	"github.com/jmoiron/sqlx"
 	chat "github.com/tutipay/ws"
 )
 
@@ -21,7 +21,11 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	hub := chat.NewHub(&sqlx.DB{})
+	db, err := chat.OpenDb("test.db")
+	if err != nil {
+		log.Fatalf("the data is null: %v", err)
+	}
+	hub := chat.NewHub(db)
 	go hub.Run()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveHome)

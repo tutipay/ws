@@ -40,4 +40,9 @@ location /ws {
      proxy_set_header Host $host;
 }
 ```
+This might not be needed, since we do in `ServeWs` endpoint.
+
+### Notes about the database
+
+There's no simple way of using a database.
 

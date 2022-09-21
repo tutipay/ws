@@ -7,7 +7,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var testDb, _ = openDb()
+var testDb, _ = OpenDb("test.db")
 
 func TestChat_insert(t *testing.T) {
 

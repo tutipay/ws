@@ -28,8 +28,8 @@ type Message struct {
 	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
 }
 
-func openDb() (*sqlx.DB, error) {
-	db, err := sqlx.Connect("sqlite3", "test.db")
+func OpenDb(name string) (*sqlx.DB, error) {
+	db, err := sqlx.Connect("sqlite3", name)
 	if err != nil {
 		log.Printf("error in opening db: %v", err)
 		return nil, err

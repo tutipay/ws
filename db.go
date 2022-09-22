@@ -13,6 +13,7 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	"to"	INTEGER,
 	"text"	TEXT,
 	"is_delivered"	INTEGER DEFAULT 0,
+	"date"  INTEGER,
 	PRIMARY KEY("id" AUTOINCREMENT)
 );`
 
@@ -26,7 +27,7 @@ type Message struct {
 	To          string `db:"to" json:"to,omitempty"`
 	Text        string `db:"text" json:"text,omitempty"`
 	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
-	Date        int64  `json:"date"`
+	Date        int64  `db:"date" json:"date"`
 }
 
 func OpenDb(name string) (*sqlx.DB, error) {

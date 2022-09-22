@@ -70,6 +70,14 @@ func (h *Hub) Run() {
 				close(client.send)
 			}
 		case message := <-h.broadcast:
+			// I feel like iterating through clients *everytime* we get a new message, is not the most
+			// efficient way of doing this. We can do something like this:
+			// client, ok := h.clients[message.To]
+			// if !ok { // the client is not there
+			// store the message in the database
+			// insert(message)
+			// }
+			// client <- message // in this case, the client is there
 			for client := range h.clients {
 				// A message contains .to and .from fields in addition to the content
 				// we could use that to match against the specific client ID we already have

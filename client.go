@@ -79,10 +79,12 @@ func (c *Client) readPump() {
 		messageJSON = bytes.TrimSpace(bytes.Replace(messageJSON, newline, space, -1))
 
 		var message Message
-
+		// we also need to capture the sender's ID here...
 		if err := json.Unmarshal(messageJSON, &message); err != nil {
 			log.Printf("error: %v", err)
 		}
+		message.From = c.ID // sender's ID
+		message.Date = time.Now().Unix()
 		// Note that the `To` and `Text` fields are required and if they are not sent with the message metadata
 		// the application will fail.
 

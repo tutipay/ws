@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS "chats" (
+	"id"	INTEGER,
+	"from"	INTEGER,
+	"to"	INTEGER,
+	"text"	TEXT,
+	"is_delivered"	INTEGER DEFAULT 0,
+	PRIMARY KEY("id" AUTOINCREMENT)
+);

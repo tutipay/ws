@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
 )
@@ -87,6 +88,9 @@ func (c *Client) readPump() {
 		message.Date = time.Now().Unix()
 		// Note that the `To` and `Text` fields are required and if they are not sent with the message metadata
 		// the application will fail.
+
+		// Generating messageID
+		message.ID = uuid.New().String() // TODO: check for the unlikely case of collisions.
 
 		// Populate message with corresponding data (inc: text, from and to) fields
 		c.hub.broadcast <- &message

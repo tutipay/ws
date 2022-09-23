@@ -8,12 +8,13 @@ import (
 )
 
 var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
-	"id"	INTEGER,
+	"id"	TEXT,
 	"from"	INTEGER,
 	"to"	INTEGER,
 	"text"	TEXT,
 	"is_delivered"	INTEGER DEFAULT 0,
-	PRIMARY KEY("id" AUTOINCREMENT)
+	"date"  INTEGER,
+	PRIMARY KEY("id")
 );`
 
 // Message represents a table of all chat messages that are stored in
@@ -21,12 +22,12 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 // We rely on the consumer of the package to provide us with their own database connection client
 // since it doesn't make much since to do that for them.
 type Message struct {
-	ID          int    `db:"id" json:"id,omitempty"`
+	ID          string `db:"id" json:"id,omitempty"`
 	From        string `db:"from" json:"from,omitempty"`
 	To          string `db:"to" json:"to,omitempty"`
 	Text        string `db:"text" json:"text,omitempty"`
 	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
-	Date        int64  `json:"date"`
+	Date        int64  `db:"date" json:"date"`
 }
 
 func OpenDb(name string) (*sqlx.DB, error) {

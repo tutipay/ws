@@ -46,3 +46,32 @@ This might not be needed, since we do in `ServeWs` endpoint.
 
 There's no simple way of using a database.
 
+
+## We are using the awesome migrate library
+
+Just to make our life's easier, we are using the awesome migrate library. You can download simply by `go install`, using
+```bash
+go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+```
+
+And then run the command 
+
+```bash
+migrate -path migrations/ -database sqlite3://test.db up
+```
+
+And the directory tree is like the following:
+
+```
+.
+├── cli
+├── home.html
+├── main.go
+├── migrate_test.go
+├── migrations
+│   ├── 000001_create_chats_table.down.sqlite3
+│   ├── 000001_create_chats_table.up.sqlite3
+│   ├── 000002_add_date_chats.down.sqlite3
+│   └── 000002_add_date_chats.up.sqlite3
+└── test.db
+```

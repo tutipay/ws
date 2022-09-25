@@ -22,6 +22,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client := &Client{db: hub.db, ID: clientID, hub: hub, conn: conn, send: make(chan *Message, 256)}
 	client.hub.register <- client
 
+	client.hub.clients[clientID] = client
+
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
 	go client.writePump()

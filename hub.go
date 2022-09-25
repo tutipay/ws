@@ -10,7 +10,7 @@ import (
 // clients.
 type Hub struct {
 	// Registered clients.
-	clients map[*Client]bool
+	clients map[string]*Client // Mapping client IDs to client object
 
 	// Inbound messages from the clients.
 	broadcast chan *Message
@@ -54,7 +54,7 @@ func NewHub(db *sqlx.DB) *Hub {
 		broadcast:  make(chan *Message),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		clients:    make(map[*Client]bool),
+		clients:    make(map[string]*Client),
 		db:         db,
 	}
 }
@@ -63,34 +63,22 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.clients[client] = true
+			h.clients[client.ID] = client
 		case client := <-h.unregister:
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
+			if _, ok := h.clients[client.ID]; ok {
+				delete(h.clients, client.ID)
 				close(client.send)
 			}
 		case message := <-h.broadcast:
-			// I feel like iterating through clients *everytime* we get a new message, is not the most
-			// efficient way of doing this. We can do something like this:
-			// client, ok := h.clients[message.To]
-			// if !ok { // the client is not there
-			// store the message in the database
-			// insert(message)
-			// }
-			// client <- message // in this case, the client is there
-			for client := range h.clients {
-				// A message contains .to and .from fields in addition to the content
-				// we could use that to match against the specific client ID we already have
-				// and only send to the one of interest. There are other cases we need to check for:
-				// - if the client.ID doesn't exist (not connected, or disconnected)
-				// - handle delivery failures as well as storing the message itself in a database
-				if message.To == client.ID {
-					select {
-					case client.send <- message:
-					default:
-						close(client.send)
-						delete(h.clients, client)
-					}
+			if client, ok := h.clients[message.To]; ok {
+				// We don't need to check for the case of non-existing clients to store the message
+				// in the database to send it to them later when they connect, because we store the
+				// message in the database in `readPump` before we send it through the broadcast channel
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client.ID)
 				}
 			}
 		}

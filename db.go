@@ -63,3 +63,11 @@ func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
 	}
 	return chats, nil
 }
+
+func markMessageAsRead(messageID string, db *sqlx.DB) error {
+	if _, err := db.Exec(`Update chats set is_delivered = 1 where "id" = $1`, messageID); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}

@@ -39,3 +39,27 @@ func OpenDb(name string) (*sqlx.DB, error) {
 	db.MustExec(stmt)
 	return db, nil
 }
+
+func insert(msg Message, db *sqlx.DB) error {
+	if _, err := db.NamedExec(`INSERT into chats("from", "to", "text") values(:from, :to, :text)`, msg); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}
+
+func updateStatus(mobile string, db *sqlx.DB) error {
+	if _, err := db.Exec(`Update chats set is_delivered = 1 where "to" = $1`, mobile); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}
+
+func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
+	var chats []Message
+	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
+		return nil, err
+	}
+	return chats, nil
+}

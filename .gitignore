@@ -1,2 +1,3 @@
 cli/cli
 cli/__debug_bin
+*.db

@@ -128,6 +128,10 @@ func (c *Client) writePump() {
 			}
 			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
 
+			// We need to mark this message as read now, because we already sent it to the client
+			// otherwise it will be sent again.
+			markMessageAsRead(message.ID, c.db)
+
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

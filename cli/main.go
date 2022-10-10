@@ -32,8 +32,6 @@ func main() {
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		chat.ServeWs(hub, w, r)
 	})
-	mux.HandleFunc("/chats", func(w http.ResponseWriter, r *http.Request) {
-		chat.PreviousMessages(*hub, w, r)
-	})
+
 	http.ListenAndServe(":8081", mux)
 }

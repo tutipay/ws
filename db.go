@@ -41,7 +41,7 @@ func OpenDb(name string) (*sqlx.DB, error) {
 }
 
 func insert(msg Message, db *sqlx.DB) error {
-	if _, err := db.NamedExec(`INSERT into chats("from", "to", "text") values(:from, :to, :text)`, msg); err != nil {
+	if _, err := db.NamedExec(`INSERT into chats("id", "from", "to", "text", "is_delivered", "date") values(:id, :from, :to, :text, :is_delivered, :date)`, msg); err != nil {
 		log.Printf("the error is: %v", err)
 		return err
 	}

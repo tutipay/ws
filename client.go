@@ -127,7 +127,7 @@ func (c *Client) writePump() {
 				return
 			}
 
-			c.conn.WriteJSON(marshal(message))
+			c.conn.WriteJSON([]byte(marshal(message)))
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
@@ -153,7 +153,7 @@ func (c *Client) PreviousMessages() {
 		return
 	}
 
-	c.conn.WriteJSON(marshal(chats))
+	c.conn.WriteJSON([]byte(marshal(chats)))
 
 	updateStatus(c.ID, c.db)
 }

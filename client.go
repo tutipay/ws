@@ -141,3 +141,19 @@ func (c *Client) writePump() {
 		}
 	}
 }
+
+// PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
+// Read it.
+// We will need to have a reference to a message instance (You can get one via: NewMessage()) and that will be populated
+// with a *sqlx.DB instance
+func (c *Client) PreviousMessages() {
+	chats, err := getUnreadMessages(c.ID, c.db)
+	if err != nil {
+		log.Printf("error: %v", err)
+		return
+	}
+
+	c.conn.WriteJSON(marshal(chats))
+
+	updateStatus(c.ID, c.db)
+}

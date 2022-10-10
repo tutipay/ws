@@ -126,7 +126,8 @@ func (c *Client) writePump() {
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
+
+			c.conn.WriteJSON(marshal(message))
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.

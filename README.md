@@ -75,3 +75,9 @@ And the directory tree is like the following:
 │   └── 000002_add_date_chats.up.sqlite3
 └── test.db
 ```
+
+### How to create database migrations
+
+```shell
+$ migrate create -ext sqlite3 -dir migrations -seq add_date_chats
+```

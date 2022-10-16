@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"log"
+
 	"github.com/jmoiron/sqlx"
 )
 

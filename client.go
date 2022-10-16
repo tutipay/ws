@@ -127,7 +127,8 @@ func (c *Client) writePump() {
 				return
 			}
 
-			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(message)))
+			// Always make a message as a list of messages, to be consistent with the database
+			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal([]Message{*message})))
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
@@ -152,8 +153,6 @@ func (c *Client) PreviousMessages() {
 		log.Printf("error: %v", err)
 		return
 	}
-
 	c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(chats)))
-
 	updateStatus(c.ID, c.db)
 }

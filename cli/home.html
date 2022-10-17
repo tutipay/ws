@@ -48,13 +48,12 @@
             appendLog(item);
           };
           conn.onmessage = function (evt) {
-            var messages = evt.data.split("\n");
+            var messages = JSON.parse(evt.data)
+            console.log(messages)
             for (var i = 0; i < messages.length; i++) {
               var item = document.createElement("div");
-              item.innerText = JSON.parse(messages[i]).text;
-              if (i == 0) {
-                item.innerText = `[Your ID:${clientID}] Rcvd: ${item.innerText}`;
-              }
+              item.innerText = messages[i].text;
+              item.innerText = `[From:${messages[i].from}] Rcvd: ${item.innerText}`;
               appendLog(item);
             }
           };

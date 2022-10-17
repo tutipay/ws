@@ -58,7 +58,7 @@ func updateStatus(mobile string, db *sqlx.DB) error {
 
 func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
 	var chats []Message
-	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by id`, mobile); err != nil {
+	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by date`, mobile); err != nil {
 		return nil, err
 	}
 	return chats, nil

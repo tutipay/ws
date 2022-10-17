@@ -17,6 +17,11 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	PRIMARY KEY("id")
 );`
 
+var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
+	"first"	 INTEGER,
+	"second" INTEGER
+);`
+
 // Message represents a table of all chat messages that are stored in
 // ws package.
 // We rely on the consumer of the package to provide us with their own database connection client
@@ -30,6 +35,15 @@ type Message struct {
 	Date        int64  `db:"date" json:"date"`
 }
 
+// Contact type represents a relationship between two clients, the relationship reads:
+// `Second` client is a contact of the `First` client, not vice verca. Because person A can have person B
+// in their contact list, but person B may not have A in their contact list. And we don't want to bother B
+// with notifications that A is connected if they don't have A in their contact list.
+type Contact struct {
+	First  string // First client ID
+	Second string // Second client ID
+}
+
 func OpenDb(name string) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("sqlite3", name)
 	if err != nil {
@@ -37,6 +51,7 @@ func OpenDb(name string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	db.MustExec(stmt)
+	db.MustExec(stmtContacts)
 	return db, nil
 }
 

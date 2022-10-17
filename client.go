@@ -153,6 +153,10 @@ func (c *Client) PreviousMessages() {
 		log.Printf("error: %v", err)
 		return
 	}
-	c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(chats)))
-	updateStatus(c.ID, c.db)
+
+	// This `if` guard is here because we don't want to send `null` when there are no unread messages
+	if len(chats) > 0 {
+		c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(chats)))
+		updateStatus(c.ID, c.db)
+	}
 }

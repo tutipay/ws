@@ -128,7 +128,7 @@ func (c *Client) writePump() {
 			}
 
 			// Always make a message as a list of messages, to be consistent with the database
-			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal([]Message{*message})))
+			c.conn.WriteJSON(Response{Type: "chat", Message: []Message{*message}})
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
@@ -156,7 +156,7 @@ func (c *Client) PreviousMessages() {
 
 	// This `if` guard is here because we don't want to send `null` when there are no unread messages
 	if len(chats) > 0 {
-		c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(chats)))
+		c.conn.WriteJSON(Response{Type: "chat", Message: chats})
 		updateStatus(c.ID, c.db)
 	}
 }

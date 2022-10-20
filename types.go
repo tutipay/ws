@@ -1,6 +1,8 @@
 package chat
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 // Response is the object returned by the api in all cases.
 type Response struct {
@@ -10,10 +12,9 @@ type Response struct {
 	Type string
 
 	// Message is the actual message and it depends on the Type of Response.
-	// 1. In case of "status", it will be the ID (phone number) of the client that became online.
-	// 2. In case of "chat", it will be an array of Message objects.
-	// In all cases they should be converted to []byte
-	Message []byte
+	// 1. In case of "status", its type will be string, and its value will be the ID (phone number) of the client that became online.
+	// 2. In case of "chat", its type is []Message, and its value will be the actual chat messages.
+	Message any
 }
 
 type validationError struct {

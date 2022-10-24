@@ -13,6 +13,13 @@ type Response struct {
 	Messages []Message `json:"messages,omitempty"`
 }
 
+type ContactsRequest struct {
+	Name   string `json:"name,omitempty"`
+	Mobile string `json:"mobile,omitempty"`
+}
+
+type User ContactsRequest
+
 type validationError struct {
 	Message string `json:"message,omitempty"`
 	Code    string `json:"code,omitempty"`

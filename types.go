@@ -6,15 +6,11 @@ import (
 
 // Response is the object returned by the api in all cases.
 type Response struct {
-	// Type is the type of Response, there are mainly 2 types:
-	// 1. "status": which is used in notifying the users that one of their contacts is online.
-	// 2. "chat": which is used in sending regular chat messages.
-	Type string
+	// Status will be null if we're sending chat messages
+	Status string `json:"status,omitempty"`
 
-	// Message is the actual message and it depends on the Type of Response.
-	// 1. In case of "status", its type will be string, and its value will be the ID (phone number) of the client that became online.
-	// 2. In case of "chat", its type is []Message, and its value will be the actual chat messages.
-	Message any
+	// Messages will be null if we're sending status of a user
+	Messages []Message `json:"messages,omitempty"`
 }
 
 type validationError struct {

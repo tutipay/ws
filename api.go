@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 )
@@ -31,4 +32,25 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// new goroutines.
 	go client.writePump()
 	go client.readPump()
+}
+
+// SubmitContacts
+func SubmitContacts(currentUser string, w http.ResponseWriter, r *http.Request) {
+	db, err := OpenDb("test.db")
+	if err != nil {
+		log.Printf("Could not open db: %v", err)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+
+	var contacts []ContactsRequest
+	if err := decoder.Decode(&contacts); err != nil {
+		log.Printf("Error in parsing JSON: %v", err)
+		return
+	}
+
+	addContactsToDB(currentUser, contacts, db)
+
+	w.Write(marshal(contacts))
 }

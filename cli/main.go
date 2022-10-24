@@ -33,5 +33,9 @@ func main() {
 		chat.ServeWs(hub, w, r)
 	})
 
-	http.ListenAndServe(":6446", mux)
+	mux.HandleFunc("/submitContacts", func(w http.ResponseWriter, r *http.Request) {
+		chat.SubmitContacts("0123456789", w, r)
+	})
+
+	log.Fatal(http.ListenAndServe(":6446", mux))
 }

@@ -18,8 +18,10 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 );`
 
 var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
-	"first"	 TEXT,
-	"second" TEXT
+	first  TEXT,
+	second TEXT,
+	FOREIGN KEY(first) REFERENCES users(mobile),
+	FOREIGN KEY(second) REFERENCES users(mobile)
 );`
 
 // Message represents a table of all chat messages that are stored in
@@ -83,6 +85,27 @@ func markMessageAsRead(messageID string, db *sqlx.DB) error {
 	if _, err := db.Exec(`Update chats set is_delivered = 1 where "id" = $1`, messageID); err != nil {
 		log.Printf("the error is: %v", err)
 		return err
+	}
+	return nil
+}
+
+func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) error {
+
+	var user User
+
+	for _, contact := range contacts {
+		row := db.QueryRow(`SELECT "fullname", "mobile" from users where "mobile" = ?`, contact.Mobile)
+		if err := row.Scan(&user.Name, &user.Mobile); err != nil {
+			log.Printf("Error in query: %v", err)
+			continue
+		}
+
+		// TODO: Fix duplication issue
+		if _, err := db.NamedExec(`INSERT into contacts("first", "second") values(:first, :second)`, Contact{currentUser, user.Mobile}); err != nil {
+			log.Printf("Error inserting contact: %v", err)
+			return err
+		}
+
 	}
 	return nil
 }

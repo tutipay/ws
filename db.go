@@ -9,8 +9,8 @@ import (
 
 var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	"id"	TEXT,
-	"from"	INTEGER,
-	"to"	INTEGER,
+	"from"	TEXT,
+	"to"	TEXT,
 	"text"	TEXT,
 	"is_delivered"	INTEGER DEFAULT 0,
 	"date"  INTEGER,

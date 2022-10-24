@@ -33,5 +33,5 @@ func main() {
 		chat.ServeWs(hub, w, r)
 	})
 
-	http.ListenAndServe(":8081", mux)
+	http.ListenAndServe(":6446", mux)
 }

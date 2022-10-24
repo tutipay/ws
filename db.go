@@ -9,8 +9,8 @@ import (
 
 var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	"id"	TEXT,
-	"from"	INTEGER,
-	"to"	INTEGER,
+	"from"	TEXT,
+	"to"	TEXT,
 	"text"	TEXT,
 	"is_delivered"	INTEGER DEFAULT 0,
 	"date"  INTEGER,
@@ -18,8 +18,8 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 );`
 
 var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
-	"first"	 INTEGER,
-	"second" INTEGER
+	"first"	 TEXT,
+	"second" TEXT
 );`
 
 // Message represents a table of all chat messages that are stored in

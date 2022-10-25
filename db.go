@@ -20,6 +20,7 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
 	first  TEXT,
 	second TEXT,
+	both   TEXT,
 	FOREIGN KEY(first) REFERENCES users(mobile),
 	FOREIGN KEY(second) REFERENCES users(mobile)
 );`
@@ -44,6 +45,9 @@ type Message struct {
 type Contact struct {
 	First  string // First client ID
 	Second string // Second client ID
+
+	// Both is the concat of First+Second and its is used in uniquely identifying the pair.
+	Both string
 }
 
 func OpenDb(name string) (*sqlx.DB, error) {
@@ -100,12 +104,20 @@ func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB
 			continue
 		}
 
-		// TODO: Fix duplication issue
-		if _, err := db.NamedExec(`INSERT into contacts("first", "second") values(:first, :second)`, Contact{currentUser, user.Mobile}); err != nil {
-			log.Printf("Error inserting contact: %v", err)
-			return err
-		}
+		// This is done to prevent duplication by checking if the record already exists
+		both := currentUser + user.Mobile
+		var resultOfBothQuery string
 
+		row = db.QueryRow(`SELECT "both" from contacts where "both" = ?`, both)
+		if err := row.Scan(&resultOfBothQuery); err != nil {
+			log.Printf("%v -> Record can be inserted", err)
+			if _, err := db.Exec(`INSERT into contacts("first", "second", "both") values($1, $2, $3)`, currentUser, user.Mobile, currentUser+user.Mobile); err != nil {
+				log.Printf("Error inserting contact: %v", err)
+				return err
+			}
+		} else {
+			log.Printf("Record already exists: %v", resultOfBothQuery)
+		}
 	}
 	return nil
 }

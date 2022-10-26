@@ -72,7 +72,7 @@ func (c *Client) readPump() {
 		_, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("readPump error: %v", err)
 			}
 			break
 		}
@@ -82,7 +82,7 @@ func (c *Client) readPump() {
 		var message Message
 		// we also need to capture the sender's ID here...
 		if err := json.Unmarshal(messageJSON, &message); err != nil {
-			log.Printf("error: %v", err)
+			log.Printf("readPump Unmarshal JSON error: %v", err)
 		}
 		message.From = c.ID // sender's ID
 		message.Date = time.Now().Unix()
@@ -150,7 +150,7 @@ func (c *Client) writePump() {
 func (c *Client) PreviousMessages() {
 	chats, err := getUnreadMessages(c.ID, c.db)
 	if err != nil {
-		log.Printf("error: %v", err)
+		log.Printf("getUnreadMessages error: %v", err)
 		return
 	}
 

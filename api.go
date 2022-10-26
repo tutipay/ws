@@ -29,7 +29,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client.PreviousMessages()
 
 	// This will broadcast that this client is online to all users who have this client as a contact
-	client.ShareStatus()
+	client.ShareStatus("online")
 
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.

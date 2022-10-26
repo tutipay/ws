@@ -163,14 +163,14 @@ func (c *Client) PreviousMessages() {
 
 // ShareStatus will send `status` messages to all connected clients that have registered
 // the current client as a contact.
-func (c *Client) ShareStatus() {
+func (c *Client) ShareStatus(status string) {
 	contacts, err := getContacts(c.ID, c.db)
 	if err == nil {
 		log.Printf("Contacts: %v", contacts)
 		for _, contact := range contacts {
 			if client, ok := c.hub.clients[contact]; ok {
 				log.Printf("Client is online: %v", client.ID)
-				client.conn.WriteJSON(Response{Status: c.ID})
+				client.conn.WriteJSON(Response{Status: StatusResponse{Mobile: c.ID, ConnectionStatus: status}})
 			}
 		}
 	}

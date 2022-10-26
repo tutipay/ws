@@ -121,3 +121,14 @@ func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB
 	}
 	return nil
 }
+
+// getContacts returns a list of user IDs (phone numbers) that have the user with the ID `clientID`
+// as their contact
+func getContacts(clientID string, db *sqlx.DB) ([]string, error) {
+	var contacts []string
+	if err := db.Select(&contacts, `SELECT "first" from contacts where "second" = $1`, clientID); err != nil {
+		log.Printf("Error retrieving contacts: %v", err)
+		return nil, err
+	}
+	return contacts, nil
+}

@@ -43,6 +43,7 @@ func (h *Hub) Run() {
 		case client := <-h.unregister:
 			log.Printf("client ID: %s got disconnected", client.ID)
 			if _, ok := h.clients[client.ID]; ok {
+				client.ShareStatus()
 				delete(h.clients, client.ID)
 				close(client.send)
 			}

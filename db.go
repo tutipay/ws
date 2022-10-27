@@ -17,6 +17,14 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	PRIMARY KEY("id")
 );`
 
+var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
+	first  TEXT,
+	second TEXT,
+	both   TEXT,
+	FOREIGN KEY(first) REFERENCES users(mobile),
+	FOREIGN KEY(second) REFERENCES users(mobile)
+);`
+
 // Message represents a table of all chat messages that are stored in
 // ws package.
 // We rely on the consumer of the package to provide us with their own database connection client
@@ -30,6 +38,18 @@ type Message struct {
 	Date        int64  `db:"date" json:"date"`
 }
 
+// Contact type represents a relationship between two clients, the relationship reads:
+// `Second` client is a contact of the `First` client, not vice verca. Because person A can have person B
+// in their contact list, but person B may not have A in their contact list. And we don't want to bother B
+// with notifications that A is connected if they don't have A in their contact list.
+type Contact struct {
+	First  string // First client ID
+	Second string // Second client ID
+
+	// Both is the concat of First+Second and its is used in uniquely identifying the pair.
+	Both string
+}
+
 func OpenDb(name string) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("sqlite3", name)
 	if err != nil {
@@ -37,6 +57,7 @@ func OpenDb(name string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	db.MustExec(stmt)
+	db.MustExec(stmtContacts)
 	return db, nil
 }
 
@@ -70,4 +91,44 @@ func markMessageAsRead(messageID string, db *sqlx.DB) error {
 		return err
 	}
 	return nil
+}
+
+func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) error {
+
+	var user User
+
+	for _, contact := range contacts {
+		row := db.QueryRow(`SELECT "fullname", "mobile" from users where "mobile" = ?`, contact.Mobile)
+		if err := row.Scan(&user.Name, &user.Mobile); err != nil {
+			log.Printf("Error in query: %v", err)
+			continue
+		}
+
+		// This is done to prevent duplication by checking if the record already exists
+		both := currentUser + user.Mobile
+		var resultOfBothQuery string
+
+		row = db.QueryRow(`SELECT "both" from contacts where "both" = ?`, both)
+		if err := row.Scan(&resultOfBothQuery); err != nil {
+			log.Printf("%v -> Record can be inserted", err)
+			if _, err := db.Exec(`INSERT into contacts("first", "second", "both") values($1, $2, $3)`, currentUser, user.Mobile, currentUser+user.Mobile); err != nil {
+				log.Printf("Error inserting contact: %v", err)
+				return err
+			}
+		} else {
+			log.Printf("Record already exists: %v", resultOfBothQuery)
+		}
+	}
+	return nil
+}
+
+// getContacts returns a list of user IDs (phone numbers) that have the user with the ID `clientID`
+// as their contact
+func getContacts(clientID string, db *sqlx.DB) ([]string, error) {
+	var contacts []string
+	if err := db.Select(&contacts, `SELECT "first" from contacts where "second" = $1`, clientID); err != nil {
+		log.Printf("Error retrieving contacts: %v", err)
+		return nil, err
+	}
+	return contacts, nil
 }

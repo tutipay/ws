@@ -72,7 +72,7 @@ func (c *Client) readPump() {
 		_, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("readPump error: %v", err)
 			}
 			break
 		}
@@ -82,7 +82,7 @@ func (c *Client) readPump() {
 		var message Message
 		// we also need to capture the sender's ID here...
 		if err := json.Unmarshal(messageJSON, &message); err != nil {
-			log.Printf("error: %v", err)
+			log.Printf("readPump Unmarshal JSON error: %v", err)
 		}
 		message.From = c.ID // sender's ID
 		message.Date = time.Now().Unix()
@@ -128,7 +128,7 @@ func (c *Client) writePump() {
 			}
 
 			// Always make a message as a list of messages, to be consistent with the database
-			c.conn.WriteMessage(websocket.TextMessage, []byte(marshal([]Message{*message})))
+			c.conn.WriteJSON(Response{Messages: []Message{*message}})
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
@@ -150,13 +150,28 @@ func (c *Client) writePump() {
 func (c *Client) PreviousMessages() {
 	chats, err := getUnreadMessages(c.ID, c.db)
 	if err != nil {
-		log.Printf("error: %v", err)
+		log.Printf("getUnreadMessages error: %v", err)
 		return
 	}
 
 	// This `if` guard is here because we don't want to send `null` when there are no unread messages
 	if len(chats) > 0 {
-		c.conn.WriteMessage(websocket.TextMessage, []byte(marshal(chats)))
+		c.conn.WriteJSON(Response{Messages: chats})
 		updateStatus(c.ID, c.db)
+	}
+}
+
+// ShareStatus will send `status` messages to all connected clients that have registered
+// the current client as a contact.
+func (c *Client) ShareStatus(status string) {
+	contacts, err := getContacts(c.ID, c.db)
+	if err == nil {
+		log.Printf("Contacts: %v", contacts)
+		for _, contact := range contacts {
+			if client, ok := c.hub.clients[contact]; ok {
+				log.Printf("Client is online: %v", client.ID)
+				client.conn.WriteJSON(Response{Status: StatusResponse{Mobile: c.ID, ConnectionStatus: status}})
+			}
+		}
 	}
 }

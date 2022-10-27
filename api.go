@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 )
@@ -10,7 +11,7 @@ import (
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		log.Printf("ServeWs upgrader error: %v", err)
 		return
 	}
 
@@ -27,8 +28,32 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// Sending messages that were sent to the client when they were offline
 	client.PreviousMessages()
 
+	// This will broadcast that this client is online to all users who have this client as a contact
+	client.ShareStatus("online")
+
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
 	go client.writePump()
 	go client.readPump()
+}
+
+// SubmitContacts
+func SubmitContacts(currentUser string, w http.ResponseWriter, r *http.Request) {
+	db, err := OpenDb("test.db")
+	if err != nil {
+		log.Printf("Could not open db: %v", err)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+
+	var contacts []ContactsRequest
+	if err := decoder.Decode(&contacts); err != nil {
+		log.Printf("Error in parsing JSON: %v", err)
+		return
+	}
+
+	addContactsToDB(currentUser, contacts, db)
+
+	w.Write(marshal(contacts))
 }

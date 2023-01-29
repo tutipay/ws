@@ -38,8 +38,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 }
 
 // SubmitContacts
-func SubmitContacts(currentUser string, w http.ResponseWriter, r *http.Request) {
-	db, err := OpenDb("test.db")
+func SubmitContacts(currentUser string, dbPath string, w http.ResponseWriter, r *http.Request) {
+	db, err := OpenDb(dbPath)
 	if err != nil {
 		log.Printf("Could not open db: %v", err)
 		return

@@ -93,9 +93,16 @@ func markMessageAsRead(messageID string, db *sqlx.DB) error {
 	return nil
 }
 
-func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) error {
+// addContactsToDB adds a "contact of" relationship between a submitted contact
+// and the currentUser It is important to note that this relationship is not
+// bidirectional, i.e. if A is a contact of B that does not mean B is also a
+// contact of A.
+//
+// Returns which of these contacts are registered users in the database
+func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) ([]ContactsRequest, error) {
 
 	var user User
+	var contactsThatAreUsers []ContactsRequest
 
 	for _, contact := range contacts {
 		row := db.QueryRow(`SELECT "fullname", "mobile" from users where "mobile" = ?`, contact.Mobile)
@@ -103,6 +110,7 @@ func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB
 			log.Printf("Error in query: %v", err)
 			continue
 		}
+		contactsThatAreUsers = append(contactsThatAreUsers, contact)
 
 		// This is done to prevent duplication by checking if the record already exists
 		both := currentUser + user.Mobile
@@ -113,13 +121,13 @@ func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB
 			log.Printf("%v -> Record can be inserted", err)
 			if _, err := db.Exec(`INSERT into contacts("first", "second", "both") values($1, $2, $3)`, currentUser, user.Mobile, currentUser+user.Mobile); err != nil {
 				log.Printf("Error inserting contact: %v", err)
-				return err
+				return nil, err
 			}
 		} else {
 			log.Printf("Record already exists: %v", resultOfBothQuery)
 		}
 	}
-	return nil
+	return contactsThatAreUsers, nil
 }
 
 // getContacts returns a list of user IDs (phone numbers) that have the user with the ID `clientID`

@@ -53,7 +53,7 @@ func SubmitContacts(currentUser string, dbPath string, w http.ResponseWriter, r 
 		return
 	}
 
-	addContactsToDB(currentUser, contacts, db)
+	areUsers, err := addContactsToDB(currentUser, contacts, db)
 
-	w.Write(marshal(contacts))
+	w.Write(marshal(areUsers))
 }

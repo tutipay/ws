@@ -33,8 +33,9 @@ func main() {
 		chat.ServeWs(hub, w, r)
 	})
 
+	// This is only for testing it's not used in production
 	mux.HandleFunc("/submitContacts", func(w http.ResponseWriter, r *http.Request) {
-		chat.SubmitContacts("0123456789", w, r)
+		chat.SubmitContacts("0123456789", "test.db", w, r)
 	})
 
 	log.Fatal(http.ListenAndServe(":6446", mux))

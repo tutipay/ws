@@ -32,6 +32,11 @@ type validationError struct {
 	Code    string `json:"code,omitempty"`
 }
 
+type outbound struct {
+	response    Response
+	markReadIDs []string
+}
+
 func marshal(o any) []byte {
 	d, _ := json.Marshal(&o)
 	return d

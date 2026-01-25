@@ -1,35 +1,53 @@
 package chat
 
 import (
-	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/jmoiron/sqlx"
+	"github.com/gorilla/websocket"
 )
 
-func Test_serveWs(t *testing.T) {
-	hub := NewHub(&sqlx.DB{})
+func TestServeWs_DirectMessage(t *testing.T) {
+	hub := NewHub(nil)
 	go hub.Run()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ServeWs(hub, w, r)
 	}))
-	defer ts.Close()
+	defer server.Close()
 
-	res, err := http.Get(ts.URL)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	connA, _, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatalf("dial client-a: %v", err)
 	}
-	greeting, err := io.ReadAll(res.Body)
-	res.Body.Close()
+	defer connA.Close()
+
+	connB, _, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-b", nil)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatalf("dial client-b: %v", err)
+	}
+	defer connB.Close()
+
+	if err := connA.WriteJSON(Message{To: "client-b", Text: "hello"}); err != nil {
+		t.Fatalf("write json: %v", err)
 	}
 
-	fmt.Printf("%s", greeting)
-
+	_ = connB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var response Response
+	if err := connB.ReadJSON(&response); err != nil {
+		t.Fatalf("read json: %v", err)
+	}
+	if len(response.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(response.Messages))
+	}
+	if response.Messages[0].From != "client-a" {
+		t.Fatalf("expected from client-a, got %q", response.Messages[0].From)
+	}
+	if response.Messages[0].Text != "hello" {
+		t.Fatalf("expected text hello, got %q", response.Messages[0].Text)
+	}
 }

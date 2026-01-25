@@ -2,73 +2,98 @@ package chat
 
 import (
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3"
 )
 
-var testDb, _ = OpenDb("test.db")
-
-func TestChat_insert(t *testing.T) {
-
-	tests := []struct {
-		name    string
-		fields  Message
-		wantErr bool
-	}{
-		{"test insertion", Message{To: "091212121", From: "404304343", Text: "This is just a test"}, false},
-		{"test insertion", Message{To: "091212121", From: "494343", Text: "second message"}, false},
-		{"test insertion", Message{To: "32", From: "4843", Text: "second message"}, false},
-		{"test insertion", Message{To: "323232", From: "494343", Text: "second message"}, false},
-		{"test insertion", Message{To: "wqwq", From: "494343", Text: "second message"}, false},
-		{"test insertion", Message{To: "32", From: "494343", Text: "second message"}, false},
+func newTestDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	db, err := OpenDb(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := insert(tt.fields, testDb); err != nil {
-				t.Errorf("Chat.insert() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	return db
+}
+
+func newMessage(to string) Message {
+	return Message{
+		ID:   uuid.New().String(),
+		From: "sender",
+		To:   to,
+		Text: "hello",
+		Date: time.Now().Unix(),
 	}
 }
 
-func TestChat_getUnreadMessages(t *testing.T) {
+func TestChat_insertAndGetUnreadMessages(t *testing.T) {
+	db := newTestDB(t)
+	msg1 := newMessage("user-1")
+	msg2 := newMessage("user-1")
 
-	tests := []struct {
-		name   string
-		fields Message
-		args   string
-		want   int
-	}{
-		{"test retrieving", Message{}, "091212121", 2},
+	if err := insert(msg1, db); err != nil {
+		t.Fatalf("insert msg1: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := getUnreadMessages(tt.args, testDb)
-			if (err != nil) && len(got) != tt.want {
-				t.Errorf("Chat.getUnreadMessages() error = %v, length %v", err, tt.want)
-				return
-			}
-		})
+	if err := insert(msg2, db); err != nil {
+		t.Fatalf("insert msg2: %v", err)
+	}
+
+	got, err := getUnreadMessages("user-1", db)
+	if err != nil {
+		t.Fatalf("getUnreadMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(got))
 	}
 }
 
-func TestMessage_readAll(t *testing.T) {
-	type args struct {
-		mobile string
-		db     *sqlx.DB
+func TestMessage_markMessagesAsRead(t *testing.T) {
+	db := newTestDB(t)
+	msg1 := newMessage("user-2")
+	msg2 := newMessage("user-2")
+
+	if err := insert(msg1, db); err != nil {
+		t.Fatalf("insert msg1: %v", err)
 	}
-	tests := []struct {
-		name string
-		args args
-	}{
-		{"make isDelivered receipt", args{mobile: "091212121", db: testDb}},
+	if err := insert(msg2, db); err != nil {
+		t.Fatalf("insert msg2: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := updateStatus(tt.args.mobile, tt.args.db); err != nil {
-				t.Errorf("Message.readAll() error = %v", err)
-			}
-		})
+
+	if err := markMessagesAsRead([]string{msg1.ID, msg2.ID}, db); err != nil {
+		t.Fatalf("markMessagesAsRead: %v", err)
+	}
+
+	got, err := getUnreadMessages("user-2", db)
+	if err != nil {
+		t.Fatalf("getUnreadMessages: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 messages, got %d", len(got))
+	}
+}
+
+func TestMessage_updateStatus(t *testing.T) {
+	db := newTestDB(t)
+	msg := newMessage("user-3")
+
+	if err := insert(msg, db); err != nil {
+		t.Fatalf("insert msg: %v", err)
+	}
+
+	if err := updateStatus("user-3", db); err != nil {
+		t.Fatalf("updateStatus: %v", err)
+	}
+
+	got, err := getUnreadMessages("user-3", db)
+	if err != nil {
+		t.Fatalf("getUnreadMessages: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 messages, got %d", len(got))
 	}
 }

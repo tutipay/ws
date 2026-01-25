@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"log"
 
 	"github.com/jmoiron/sqlx"
@@ -15,7 +16,8 @@ var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
 	"is_delivered"	INTEGER DEFAULT 0,
 	"date"  INTEGER,
 	PRIMARY KEY("id")
-);`
+);
+CREATE INDEX IF NOT EXISTS "idx_chats_to_delivered_date" ON "chats"("to", "is_delivered", "date");`
 
 var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
 	first  TEXT,
@@ -23,7 +25,9 @@ var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
 	both   TEXT,
 	FOREIGN KEY(first) REFERENCES users(mobile),
 	FOREIGN KEY(second) REFERENCES users(mobile)
-);`
+);
+CREATE INDEX IF NOT EXISTS "idx_contacts_second" ON "contacts"("second");
+CREATE INDEX IF NOT EXISTS "idx_contacts_both" ON "contacts"("both");`
 
 // Message represents a table of all chat messages that are stored in
 // ws package.
@@ -62,6 +66,9 @@ func OpenDb(name string) (*sqlx.DB, error) {
 }
 
 func insert(msg Message, db *sqlx.DB) error {
+	if db == nil {
+		return nil
+	}
 	if _, err := db.NamedExec(`INSERT into chats("id", "from", "to", "text", "is_delivered", "date") values(:id, :from, :to, :text, :is_delivered, :date)`, msg); err != nil {
 		log.Printf("the error is: %v", err)
 		return err
@@ -70,6 +77,9 @@ func insert(msg Message, db *sqlx.DB) error {
 }
 
 func updateStatus(mobile string, db *sqlx.DB) error {
+	if db == nil {
+		return nil
+	}
 	if _, err := db.Exec(`Update chats set is_delivered = 1 where "to" = $1`, mobile); err != nil {
 		log.Printf("the error is: %v", err)
 		return err
@@ -78,6 +88,9 @@ func updateStatus(mobile string, db *sqlx.DB) error {
 }
 
 func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
+	if db == nil {
+		return nil, nil
+	}
 	var chats []Message
 	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by date`, mobile); err != nil {
 		return nil, err
@@ -86,7 +99,27 @@ func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
 }
 
 func markMessageAsRead(messageID string, db *sqlx.DB) error {
+	if db == nil {
+		return nil
+	}
 	if _, err := db.Exec(`Update chats set is_delivered = 1 where "id" = $1`, messageID); err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	return nil
+}
+
+func markMessagesAsRead(messageIDs []string, db *sqlx.DB) error {
+	if db == nil || len(messageIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(`Update chats set is_delivered = 1 where "id" IN (?)`, messageIDs)
+	if err != nil {
+		log.Printf("the error is: %v", err)
+		return err
+	}
+	query = db.Rebind(query)
+	if _, err := db.Exec(query, args...); err != nil {
 		log.Printf("the error is: %v", err)
 		return err
 	}
@@ -100,6 +133,9 @@ func markMessageAsRead(messageID string, db *sqlx.DB) error {
 //
 // Returns which of these contacts are registered users in the database
 func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) ([]ContactsRequest, error) {
+	if db == nil {
+		return nil, errors.New("db is nil")
+	}
 
 	var user User
 	var contactsThatAreUsers []ContactsRequest
@@ -133,6 +169,9 @@ func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB
 // getContacts returns a list of user IDs (phone numbers) that have the user with the ID `clientID`
 // as their contact
 func getContacts(clientID string, db *sqlx.DB) ([]string, error) {
+	if db == nil {
+		return nil, nil
+	}
 	var contacts []string
 	if err := db.Select(&contacts, `SELECT "first" from contacts where "second" = $1`, clientID); err != nil {
 		log.Printf("Error retrieving contacts: %v", err)

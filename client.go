@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
-	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,30 +13,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
-)
-
 var (
 	newline = []byte{'\n'}
 	space   = []byte{' '}
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true }, // TODO: This is dangerous, it must be changed
-}
 
 // Client is a middleman between the websocket connection and the hub.
 // It is important to note that Client should be also
@@ -47,10 +28,14 @@ type Client struct {
 	conn *websocket.Conn
 
 	// Buffered channel of outbound messages.
-	send chan *Message
+	send chan outbound
 
 	// Chat instance to persist the chats
 	db *sqlx.DB
+
+	done      chan struct{}
+	closeOnce sync.Once
+	replaced  uint32
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -60,12 +45,18 @@ type Client struct {
 // reads from this goroutine.
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.unregister <- c
-		c.conn.Close()
+		c.hub.unregisterClient(c)
+		if !c.isReplaced() {
+			c.NotifyStatus("offline")
+		}
+		c.close()
 	}()
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	c.conn.SetReadLimit(c.hub.cfg.MaxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
+		return nil
+	})
 	for {
 		// The client should send the message as a JSON string that contains the message text as well
 		// as the message metadata through the websocket connection.
@@ -83,6 +74,11 @@ func (c *Client) readPump() {
 		// we also need to capture the sender's ID here...
 		if err := json.Unmarshal(messageJSON, &message); err != nil {
 			log.Printf("readPump Unmarshal JSON error: %v", err)
+			continue
+		}
+		if message.To == "" || message.Text == "" {
+			log.Printf("readPump validation error: missing to or text")
+			continue
 		}
 		message.From = c.ID // sender's ID
 		message.Date = time.Now().Unix()
@@ -93,13 +89,16 @@ func (c *Client) readPump() {
 		message.ID = uuid.New().String() // TODO: check for the unlikely case of collisions.
 
 		// Populate message with corresponding data (inc: text, from and to) fields
-		c.hub.broadcast <- &message
+		if ok := c.hub.broadcastMessage(&message); !ok {
+			return
+		}
 
 		if c.db != nil {
 			// We can safely store data into db at this stage
 			// db is: c.hub.db
-			log.Print("we are in db")
-			insert(message, c.db)
+			if err := insert(message, c.db); err != nil {
+				log.Printf("readPump insert error: %v", err)
+			}
 		}
 
 	}
@@ -111,34 +110,35 @@ func (c *Client) readPump() {
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
 func (c *Client) writePump() {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.hub.cfg.PingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
 	}()
 	for {
 		select {
-		case message, ok := <-c.send:
+		case message := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait))
 
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			if err := c.conn.WriteJSON(message.response); err != nil {
 				return
 			}
-
-			// Always make a message as a list of messages, to be consistent with the database
-			c.conn.WriteJSON(Response{Messages: []Message{*message}})
 
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
-			markMessageAsRead(message.ID, c.db)
+			if len(message.markReadIDs) > 0 && c.db != nil {
+				if err := markMessagesAsRead(message.markReadIDs, c.db); err != nil {
+					log.Printf("writePump markMessagesAsRead error: %v", err)
+				}
+			}
 
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+		case <-c.done:
+			return
 		}
 	}
 }
@@ -156,8 +156,14 @@ func (c *Client) PreviousMessages() {
 
 	// This `if` guard is here because we don't want to send `null` when there are no unread messages
 	if len(chats) > 0 {
-		c.conn.WriteJSON(Response{Messages: chats})
-		updateStatus(c.ID, c.db)
+		messageIDs := make([]string, 0, len(chats))
+		for _, chat := range chats {
+			messageIDs = append(messageIDs, chat.ID)
+		}
+		_ = c.enqueue(outbound{
+			response:    Response{Messages: chats},
+			markReadIDs: messageIDs,
+		})
 	}
 }
 
@@ -166,12 +172,38 @@ func (c *Client) PreviousMessages() {
 func (c *Client) ShareStatus(status string) {
 	contacts, err := getContacts(c.ID, c.db)
 	if err == nil {
-		log.Printf("Contacts: %v", contacts)
-		for _, contact := range contacts {
-			if client, ok := c.hub.clients[contact]; ok {
-				log.Printf("Client is online: %v", client.ID)
-				client.conn.WriteJSON(Response{Status: StatusResponse{Mobile: c.ID, ConnectionStatus: status}})
-			}
-		}
+		_ = c.hub.queueStatus(statusUpdate{
+			from:     c.ID,
+			status:   status,
+			contacts: contacts,
+		})
 	}
+}
+
+func (c *Client) NotifyStatus(status string) {
+	c.ShareStatus(status)
+}
+
+func (c *Client) close() {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.conn.Close()
+	})
+}
+
+func (c *Client) enqueue(message outbound) bool {
+	select {
+	case c.send <- message:
+		return true
+	case <-c.done:
+		return false
+	}
+}
+
+func (c *Client) markReplaced() {
+	atomic.StoreUint32(&c.replaced, 1)
+}
+
+func (c *Client) isReplaced() bool {
+	return atomic.LoadUint32(&c.replaced) == 1
 }

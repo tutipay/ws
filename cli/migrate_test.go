@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"log"
+	"path/filepath"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -12,7 +13,8 @@ import (
 
 func TestMigrationTable(t *testing.T) {
 
-	db, err := sql.Open("sqlite3", "./test.db")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("error in open db: %v", err)
 	}
@@ -34,7 +36,7 @@ func TestMigrationTable(t *testing.T) {
 	}
 
 	// modify for Down
-	if err := m.Up(); err != nil {
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		log.Fatalf("error in migrating: %v", err)
 	}
 }

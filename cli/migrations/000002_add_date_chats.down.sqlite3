@@ -1,1 +1,12 @@
-alter table chats add date INTEGER;
+CREATE TABLE IF NOT EXISTS "chats_new" (
+	"id"	TEXT,
+	"from"	TEXT,
+	"to"	TEXT,
+	"text"	TEXT,
+	"is_delivered"	INTEGER DEFAULT 0,
+	PRIMARY KEY("id")
+);
+INSERT INTO "chats_new" ("id", "from", "to", "text", "is_delivered")
+SELECT "id", "from", "to", "text", "is_delivered" FROM "chats";
+DROP TABLE "chats";
+ALTER TABLE "chats_new" RENAME TO "chats";

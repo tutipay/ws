@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS "contacts" (
+	first  TEXT,
+	second TEXT,
+	both   TEXT,
+	FOREIGN KEY(first) REFERENCES users(mobile),
+	FOREIGN KEY(second) REFERENCES users(mobile)
+);
+CREATE INDEX IF NOT EXISTS "idx_contacts_second" ON "contacts"("second");
+CREATE INDEX IF NOT EXISTS "idx_contacts_both" ON "contacts"("both");

@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS "idx_contacts_second";
+DROP INDEX IF EXISTS "idx_contacts_both";
+DROP TABLE IF EXISTS "contacts";

@@ -1,24 +1,56 @@
 package chat
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite3"
+	"github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func newTestDB(t *testing.T) *sqlx.DB {
 	t.Helper()
-	db, err := OpenDb(":memory:")
+	db, err := sqlx.Connect("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := runMigrations(db, filepath.Join("cli", "migrations")); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
 	t.Cleanup(func() {
 		_ = db.Close()
 	})
 	return db
+}
+
+func runMigrations(db *sqlx.DB, migrationsPath string) error {
+	instance, err := sqlite3.WithInstance(db.DB, &sqlite3.Config{})
+	if err != nil {
+		return err
+	}
+	path, err := filepath.Abs(migrationsPath)
+	if err != nil {
+		return err
+	}
+	fSrc, err := (&file.File{}).Open(path)
+	if err != nil {
+		return err
+	}
+	m, err := migrate.NewWithInstance("file", fSrc, "sqlite3", instance)
+	if err != nil {
+		return err
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return err
+	}
+	return nil
 }
 
 func newMessage(to string) Message {

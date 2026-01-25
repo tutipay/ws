@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // serveWs handles websocket requests from the peer. The hub needs to be populated
@@ -50,15 +52,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 }
 
 // SubmitContacts
-func SubmitContacts(currentUser string, dbPath string, w http.ResponseWriter, r *http.Request) {
-	db, err := OpenDb(dbPath)
-	if err != nil {
-		log.Printf("Could not open db: %v", err)
-		http.Error(w, "could not open db", http.StatusInternalServerError)
-		return
-	}
-	defer db.Close()
-
+func SubmitContacts(currentUser string, db *sqlx.DB, w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 
 	var contacts []ContactsRequest

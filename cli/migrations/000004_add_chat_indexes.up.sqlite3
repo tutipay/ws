@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS "idx_chats_to_delivered_date" ON "chats"("to", "is_delivered", "date");

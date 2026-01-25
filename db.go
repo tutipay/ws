@@ -5,29 +5,7 @@ import (
 	"log"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3"
 )
-
-var stmt = `CREATE TABLE IF NOT EXISTS "chats" (
-	"id"	TEXT,
-	"from"	TEXT,
-	"to"	TEXT,
-	"text"	TEXT,
-	"is_delivered"	INTEGER DEFAULT 0,
-	"date"  INTEGER,
-	PRIMARY KEY("id")
-);
-CREATE INDEX IF NOT EXISTS "idx_chats_to_delivered_date" ON "chats"("to", "is_delivered", "date");`
-
-var stmtContacts = `CREATE TABLE IF NOT EXISTS "contacts" (
-	first  TEXT,
-	second TEXT,
-	both   TEXT,
-	FOREIGN KEY(first) REFERENCES users(mobile),
-	FOREIGN KEY(second) REFERENCES users(mobile)
-);
-CREATE INDEX IF NOT EXISTS "idx_contacts_second" ON "contacts"("second");
-CREATE INDEX IF NOT EXISTS "idx_contacts_both" ON "contacts"("both");`
 
 // Message represents a table of all chat messages that are stored in
 // ws package.
@@ -52,17 +30,6 @@ type Contact struct {
 
 	// Both is the concat of First+Second and its is used in uniquely identifying the pair.
 	Both string
-}
-
-func OpenDb(name string) (*sqlx.DB, error) {
-	db, err := sqlx.Connect("sqlite3", name)
-	if err != nil {
-		log.Printf("error in opening db: %v", err)
-		return nil, err
-	}
-	db.MustExec(stmt)
-	db.MustExec(stmtContacts)
-	return db, nil
 }
 
 func insert(msg Message, db *sqlx.DB) error {

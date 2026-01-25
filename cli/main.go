@@ -1,8 +1,15 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite3"
+	"github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/mattn/go-sqlite3"
 
 	chat "github.com/tutipay/ws"
 )
@@ -21,10 +28,14 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	db, err := chat.OpenDb("test.db")
+	db, err := sqlx.Connect("sqlite3", "test.db")
 	if err != nil {
 		log.Fatalf("the data is null: %v", err)
 	}
+	if err := runMigrations(db.DB, "./migrations"); err != nil {
+		log.Fatalf("error in migrating: %v", err)
+	}
+	defer db.Close()
 	hub := chat.NewHub(db)
 	go hub.Run()
 	mux := http.NewServeMux()
@@ -35,8 +46,31 @@ func main() {
 
 	// This is only for testing it's not used in production
 	mux.HandleFunc("/submitContacts", func(w http.ResponseWriter, r *http.Request) {
-		chat.SubmitContacts("0123456789", "test.db", w, r)
+		chat.SubmitContacts("0123456789", db, w, r)
 	})
 
 	log.Fatal(http.ListenAndServe(":6446", mux))
+}
+
+func runMigrations(db *sql.DB, dir string) error {
+	instance, err := sqlite3.WithInstance(db, &sqlite3.Config{})
+	if err != nil {
+		return err
+	}
+
+	fSrc, err := (&file.File{}).Open(dir)
+	if err != nil {
+		return err
+	}
+
+	m, err := migrate.NewWithInstance("file", fSrc, "sqlite3", instance)
+	if err != nil {
+		return err
+	}
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return err
+	}
+
+	return nil
 }

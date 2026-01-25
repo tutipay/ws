@@ -75,7 +75,7 @@ func TestChat_insertAndGetUnreadMessages(t *testing.T) {
 		t.Fatalf("insert msg2: %v", err)
 	}
 
-	got, err := getUnreadMessages("user-1", db)
+	got, err := getUnreadMessages("user-1", 0, db)
 	if err != nil {
 		t.Fatalf("getUnreadMessages: %v", err)
 	}
@@ -96,11 +96,11 @@ func TestMessage_markMessagesAsRead(t *testing.T) {
 		t.Fatalf("insert msg2: %v", err)
 	}
 
-	if err := markMessagesAsRead([]string{msg1.ID, msg2.ID}, db); err != nil {
+	if err := markMessagesAsRead([]string{msg1.ID, msg2.ID}, db, 0); err != nil {
 		t.Fatalf("markMessagesAsRead: %v", err)
 	}
 
-	got, err := getUnreadMessages("user-2", db)
+	got, err := getUnreadMessages("user-2", 0, db)
 	if err != nil {
 		t.Fatalf("getUnreadMessages: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestMessage_updateStatus(t *testing.T) {
 		t.Fatalf("updateStatus: %v", err)
 	}
 
-	got, err := getUnreadMessages("user-3", db)
+	got, err := getUnreadMessages("user-3", 0, db)
 	if err != nil {
 		t.Fatalf("getUnreadMessages: %v", err)
 	}

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"net/http"
+	"runtime"
 	"time"
 )
 
@@ -18,6 +19,18 @@ const (
 	defaultRegisterBuffer   = 256
 	defaultUnregisterBuffer = 256
 	defaultStatusBuffer     = 256
+
+	defaultBroadcastWorkers = 4
+	defaultStatusWorkers    = 2
+
+	defaultPersistBuffer        = 1024
+	defaultPersistWorkers       = 1
+	defaultPersistBatchSize     = 64
+	defaultPersistFlushInterval = 5 * time.Millisecond
+
+	defaultMaxUnreadMessages = 200
+	defaultUnreadBatchSize   = 50
+	defaultMarkReadBatch     = 500
 )
 
 type HubConfig struct {
@@ -27,29 +40,63 @@ type HubConfig struct {
 	StatusBuffer     int
 	ClientSendBuffer int
 
+	BroadcastWorkers int
+	StatusWorkers    int
+
+	PersistBuffer        int
+	PersistWorkers       int
+	PersistBatchSize     int
+	PersistFlushInterval time.Duration
+
+	MaxUnreadMessages int
+	UnreadBatchSize   int
+	MarkReadBatch     int
+
 	WriteWait      time.Duration
 	PongWait       time.Duration
 	PingPeriod     time.Duration
 	MaxMessageSize int64
 
-	ReadBufferSize  int
-	WriteBufferSize int
-	CheckOrigin     func(*http.Request) bool
+	ReadBufferSize      int
+	WriteBufferSize     int
+	CheckOrigin         func(*http.Request) bool
+	ClientIDFromRequest func(*http.Request) (string, error)
 }
 
 func DefaultHubConfig() HubConfig {
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	broadcastWorkers := workers
+	if broadcastWorkers < defaultBroadcastWorkers {
+		broadcastWorkers = defaultBroadcastWorkers
+	}
+	statusWorkers := workers / 2
+	if statusWorkers < 1 {
+		statusWorkers = 1
+	}
 	return HubConfig{
-		RegisterBuffer:   defaultRegisterBuffer,
-		UnregisterBuffer: defaultUnregisterBuffer,
-		BroadcastBuffer:  defaultBroadcastBuffer,
-		StatusBuffer:     defaultStatusBuffer,
-		ClientSendBuffer: defaultClientSendBuffer,
-		WriteWait:        defaultWriteWait,
-		PongWait:         defaultPongWait,
-		PingPeriod:       (defaultPongWait * 9) / 10,
-		MaxMessageSize:   defaultMaxMessageSize,
-		ReadBufferSize:   defaultReadBufferSize,
-		WriteBufferSize:  defaultWriteBufferSize,
+		RegisterBuffer:       defaultRegisterBuffer,
+		UnregisterBuffer:     defaultUnregisterBuffer,
+		BroadcastBuffer:      defaultBroadcastBuffer,
+		StatusBuffer:         defaultStatusBuffer,
+		ClientSendBuffer:     defaultClientSendBuffer,
+		BroadcastWorkers:     broadcastWorkers,
+		StatusWorkers:        statusWorkers,
+		PersistBuffer:        defaultPersistBuffer,
+		PersistWorkers:       defaultPersistWorkers,
+		PersistBatchSize:     defaultPersistBatchSize,
+		PersistFlushInterval: defaultPersistFlushInterval,
+		MaxUnreadMessages:    defaultMaxUnreadMessages,
+		UnreadBatchSize:      defaultUnreadBatchSize,
+		MarkReadBatch:        defaultMarkReadBatch,
+		WriteWait:            defaultWriteWait,
+		PongWait:             defaultPongWait,
+		PingPeriod:           (defaultPongWait * 9) / 10,
+		MaxMessageSize:       defaultMaxMessageSize,
+		ReadBufferSize:       defaultReadBufferSize,
+		WriteBufferSize:      defaultWriteBufferSize,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
@@ -73,6 +120,33 @@ func (cfg HubConfig) withDefaults() HubConfig {
 	if cfg.ClientSendBuffer <= 0 {
 		cfg.ClientSendBuffer = def.ClientSendBuffer
 	}
+	if cfg.BroadcastWorkers <= 0 {
+		cfg.BroadcastWorkers = def.BroadcastWorkers
+	}
+	if cfg.StatusWorkers <= 0 {
+		cfg.StatusWorkers = def.StatusWorkers
+	}
+	if cfg.PersistBuffer <= 0 {
+		cfg.PersistBuffer = def.PersistBuffer
+	}
+	if cfg.PersistWorkers <= 0 {
+		cfg.PersistWorkers = def.PersistWorkers
+	}
+	if cfg.PersistBatchSize <= 0 {
+		cfg.PersistBatchSize = def.PersistBatchSize
+	}
+	if cfg.PersistFlushInterval <= 0 {
+		cfg.PersistFlushInterval = def.PersistFlushInterval
+	}
+	if cfg.MaxUnreadMessages <= 0 {
+		cfg.MaxUnreadMessages = def.MaxUnreadMessages
+	}
+	if cfg.UnreadBatchSize <= 0 {
+		cfg.UnreadBatchSize = def.UnreadBatchSize
+	}
+	if cfg.MarkReadBatch <= 0 {
+		cfg.MarkReadBatch = def.MarkReadBatch
+	}
 	if cfg.WriteWait <= 0 {
 		cfg.WriteWait = def.WriteWait
 	}
@@ -93,6 +167,9 @@ func (cfg HubConfig) withDefaults() HubConfig {
 	}
 	if cfg.CheckOrigin == nil {
 		cfg.CheckOrigin = def.CheckOrigin
+	}
+	if cfg.ClientIDFromRequest == nil {
+		cfg.ClientIDFromRequest = def.ClientIDFromRequest
 	}
 	return cfg
 }

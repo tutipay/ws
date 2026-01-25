@@ -2,17 +2,37 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
 	"github.com/jmoiron/sqlx"
 )
 
+var (
+	ErrUnauthorized = errors.New("unauthorized")
+	ErrBadRequest   = errors.New("bad request")
+)
+
 // serveWs handles websocket requests from the peer. The hub needs to be populated
 // with a *sqlx.DB reference, since we will need to store messages
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	// We can change this to JSON instead
-	clientID := r.URL.Query().Get("clientID")
+	var clientID string
+	var err error
+	if hub.cfg.ClientIDFromRequest != nil {
+		clientID, err = hub.cfg.ClientIDFromRequest(r)
+		if err != nil {
+			status := http.StatusUnauthorized
+			if errors.Is(err, ErrBadRequest) {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+	} else {
+		// We can change this to JSON instead
+		clientID = r.URL.Query().Get("clientID")
+	}
 	if clientID == "" {
 		http.Error(w, "clientID is required", http.StatusBadRequest)
 		return

@@ -104,17 +104,15 @@ func (c *Client) readPump() {
 		// Generating messageID
 		message.ID = uuid.New().String() // TODO: check for the unlikely case of collisions.
 
+		// Persist before broadcast to ensure at-least-once delivery semantics.
+		if err := c.hub.persistMessage(message); err != nil {
+			log.Printf("readPump persist error: %v", err)
+			continue
+		}
+
 		// Populate message with corresponding data (inc: text, from and to) fields
 		if ok := c.hub.broadcastMessage(&message); !ok {
 			return
-		}
-
-		if c.db != nil {
-			// We can safely store data into db at this stage
-			// db is: c.hub.db
-			if err := insert(message, c.db); err != nil {
-				log.Printf("readPump insert error: %v", err)
-			}
 		}
 
 	}
@@ -143,7 +141,7 @@ func (c *Client) writePump() {
 			// We need to mark this message as read now, because we already sent it to the client
 			// otherwise it will be sent again.
 			if len(message.markReadIDs) > 0 && c.db != nil {
-				if err := markMessagesAsRead(message.markReadIDs, c.db); err != nil {
+				if err := markMessagesAsRead(message.markReadIDs, c.db, c.hub.cfg.MarkReadBatch); err != nil {
 					log.Printf("writePump markMessagesAsRead error: %v", err)
 				}
 			}
@@ -164,7 +162,8 @@ func (c *Client) writePump() {
 // We will need to have a reference to a message instance (You can get one via: NewMessage()) and that will be populated
 // with a *sqlx.DB instance
 func (c *Client) PreviousMessages() {
-	chats, err := getUnreadMessages(c.ID, c.db)
+	limit := c.hub.cfg.MaxUnreadMessages
+	chats, err := getUnreadMessages(c.ID, limit, c.db)
 	if err != nil {
 		log.Printf("getUnreadMessages error: %v", err)
 		return
@@ -172,14 +171,27 @@ func (c *Client) PreviousMessages() {
 
 	// This `if` guard is here because we don't want to send `null` when there are no unread messages
 	if len(chats) > 0 {
-		messageIDs := make([]string, 0, len(chats))
-		for _, chat := range chats {
-			messageIDs = append(messageIDs, chat.ID)
+		batchSize := c.hub.cfg.UnreadBatchSize
+		if batchSize <= 0 || batchSize > len(chats) {
+			batchSize = len(chats)
 		}
-		_ = c.enqueue(outbound{
-			response:    Response{Messages: chats},
-			markReadIDs: messageIDs,
-		})
+		for i := 0; i < len(chats); i += batchSize {
+			end := i + batchSize
+			if end > len(chats) {
+				end = len(chats)
+			}
+			batch := chats[i:end]
+			messageIDs := make([]string, 0, len(batch))
+			for _, chat := range batch {
+				messageIDs = append(messageIDs, chat.ID)
+			}
+			if ok := c.enqueue(outbound{
+				response:    Response{Messages: batch},
+				markReadIDs: messageIDs,
+			}); !ok {
+				return
+			}
+		}
 	}
 }
 

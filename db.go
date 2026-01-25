@@ -35,11 +35,27 @@ type Contact struct {
 }
 
 func insert(msg Message, db *sqlx.DB) error {
-	if db == nil {
+	return insertBatch([]Message{msg}, db)
+}
+
+func insertBatch(messages []Message, db *sqlx.DB) error {
+	if db == nil || len(messages) == 0 {
 		return nil
 	}
-	if _, err := db.NamedExec(`INSERT into chats("id", "from", "to", "text", "is_delivered", "date") values(:id, :from, :to, :text, :is_delivered, :date)`, msg); err != nil {
-		log.Printf("the error is: %v", err)
+	tx, err := db.Beginx()
+	if err != nil {
+		log.Printf("insertBatch begin error: %v", err)
+		return err
+	}
+	for _, msg := range messages {
+		if _, err := tx.NamedExec(`INSERT into chats("id", "from", "to", "text", "is_delivered", "date") values(:id, :from, :to, :text, :is_delivered, :date)`, msg); err != nil {
+			_ = tx.Rollback()
+			log.Printf("insertBatch exec error: %v", err)
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("insertBatch commit error: %v", err)
 		return err
 	}
 	return nil
@@ -56,12 +72,19 @@ func updateStatus(mobile string, db *sqlx.DB) error {
 	return nil
 }
 
-func getUnreadMessages(mobile string, db *sqlx.DB) ([]Message, error) {
+func getUnreadMessages(mobile string, limit int, db *sqlx.DB) ([]Message, error) {
 	if db == nil {
 		return nil, nil
 	}
+	query := `SELECT * from chats where "to" = ? and is_delivered = 0 order by date`
+	args := []any{mobile}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	query = db.Rebind(query)
 	var chats []Message
-	if err := db.Select(&chats, `SELECT * from chats where "to" = $1 and is_delivered = 0 order by date`, mobile); err != nil {
+	if err := db.Select(&chats, query, args...); err != nil {
 		return nil, err
 	}
 	return chats, nil
@@ -78,19 +101,29 @@ func markMessageAsRead(messageID string, db *sqlx.DB) error {
 	return nil
 }
 
-func markMessagesAsRead(messageIDs []string, db *sqlx.DB) error {
+func markMessagesAsRead(messageIDs []string, db *sqlx.DB, batchSize int) error {
 	if db == nil || len(messageIDs) == 0 {
 		return nil
 	}
-	query, args, err := sqlx.In(`Update chats set is_delivered = 1 where "id" IN (?)`, messageIDs)
-	if err != nil {
-		log.Printf("the error is: %v", err)
-		return err
+	if batchSize <= 0 {
+		batchSize = len(messageIDs)
 	}
-	query = db.Rebind(query)
-	if _, err := db.Exec(query, args...); err != nil {
-		log.Printf("the error is: %v", err)
-		return err
+	for start := 0; start < len(messageIDs); start += batchSize {
+		end := start + batchSize
+		if end > len(messageIDs) {
+			end = len(messageIDs)
+		}
+		batch := messageIDs[start:end]
+		query, args, err := sqlx.In(`Update chats set is_delivered = 1 where "id" IN (?)`, batch)
+		if err != nil {
+			log.Printf("the error is: %v", err)
+			return err
+		}
+		query = db.Rebind(query)
+		if _, err := db.Exec(query, args...); err != nil {
+			log.Printf("the error is: %v", err)
+			return err
+		}
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package chat
 import (
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
@@ -19,6 +20,9 @@ type Hub struct {
 
 	// Status updates for contacts.
 	status chan statusUpdate
+
+	// Typing state per sender -> recipient.
+	typing map[string]map[string]bool
 
 	// Register requests from the clients.
 	register chan *Client
@@ -49,6 +53,7 @@ func NewHubWithConfig(db *sqlx.DB, cfg HubConfig) *Hub {
 		unregister: make(chan *Client, cfg.UnregisterBuffer),
 		status:     make(chan statusUpdate, cfg.StatusBuffer),
 		clients:    make(map[string]*Client),
+		typing:     make(map[string]map[string]bool),
 		db:         db,
 		cfg:        cfg,
 		upgrader: websocket.Upgrader{
@@ -69,15 +74,21 @@ func (h *Hub) Run() {
 			if existing, ok := h.clients[client.ID]; ok {
 				existing.markReplaced()
 				existing.close()
+				h.clearTypingFor(existing.ID)
 			}
 			h.clients[client.ID] = client
 		case client := <-h.unregister:
 			log.Printf("client ID: %s got disconnected", client.ID)
 			if existing, ok := h.clients[client.ID]; ok && existing == client {
+				h.clearTypingFor(client.ID)
 				delete(h.clients, client.ID)
 				client.close()
 			}
 		case message := <-h.broadcast:
+			if message.Type == "typing" {
+				h.handleTyping(message)
+				continue
+			}
 			if client, ok := h.clients[message.To]; ok {
 				// We don't need to check for the case of non-existing clients to store the message
 				// in the database to send it to them later when they connect, because we store the
@@ -158,4 +169,60 @@ type statusUpdate struct {
 	from     string
 	status   string
 	contacts []string
+}
+
+func (h *Hub) handleTyping(message *Message) {
+	if message.To == "" || message.From == "" {
+		return
+	}
+	isTyping := message.IsTyping != nil && *message.IsTyping
+	h.setTyping(message.From, message.To, isTyping)
+	if client, ok := h.clients[message.To]; ok {
+		h.trySend(client, outbound{
+			response: Response{Messages: []Message{*message}},
+		})
+	}
+}
+
+func (h *Hub) setTyping(from, to string, isTyping bool) {
+	if h.typing == nil {
+		h.typing = make(map[string]map[string]bool)
+	}
+	targets, ok := h.typing[from]
+	if !ok {
+		if !isTyping {
+			return
+		}
+		targets = make(map[string]bool)
+		h.typing[from] = targets
+	}
+	if isTyping {
+		targets[to] = true
+		return
+	}
+	delete(targets, to)
+	if len(targets) == 0 {
+		delete(h.typing, from)
+	}
+}
+
+func (h *Hub) clearTypingFor(from string) {
+	targets, ok := h.typing[from]
+	if !ok {
+		return
+	}
+	for to := range targets {
+		if client, ok := h.clients[to]; ok {
+			isTyping := false
+			message := Message{
+				From:     from,
+				To:       to,
+				Type:     "typing",
+				IsTyping: &isTyping,
+				Date:     time.Now().Unix(),
+			}
+			h.trySend(client, outbound{response: Response{Messages: []Message{message}}})
+		}
+	}
+	delete(h.typing, from)
 }

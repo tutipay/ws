@@ -18,6 +18,8 @@ type Message struct {
 	Text        string `db:"text" json:"text,omitempty"`
 	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
 	Date        int64  `db:"date" json:"date"`
+	Type        string `db:"-" json:"type,omitempty"`
+	IsTyping    *bool  `db:"-" json:"is_typing,omitempty"`
 }
 
 // Contact type represents a relationship between two clients, the relationship reads:

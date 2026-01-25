@@ -76,6 +76,19 @@ func (c *Client) readPump() {
 			log.Printf("readPump Unmarshal JSON error: %v", err)
 			continue
 		}
+		if message.Type == "typing" {
+			if message.To == "" {
+				log.Printf("readPump typing validation error: missing to")
+				continue
+			}
+			message.From = c.ID
+			message.Date = time.Now().Unix()
+			if ok := c.hub.broadcastMessage(&message); !ok {
+				return
+			}
+			continue
+		}
+
 		if message.To == "" || message.Text == "" {
 			log.Printf("readPump validation error: missing to or text")
 			continue

@@ -76,6 +76,9 @@ func (c *Client) readPump() {
 			log.Printf("readPump Unmarshal JSON error: %v", err)
 			continue
 		}
+		if message.IsTyping != nil && message.Type == "" {
+			message.Type = "typing"
+		}
 		if message.Type == "typing" {
 			if message.To == "" {
 				log.Printf("readPump typing validation error: missing to")

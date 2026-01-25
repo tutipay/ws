@@ -89,6 +89,7 @@ func (h *Hub) Run() {
 				h.handleTyping(message)
 				continue
 			}
+			h.clearTypingBetween(message.From, message.To, true)
 			if client, ok := h.clients[message.To]; ok {
 				// We don't need to check for the case of non-existing clients to store the message
 				// in the database to send it to them later when they connect, because we store the
@@ -178,7 +179,7 @@ func (h *Hub) handleTyping(message *Message) {
 	isTyping := message.IsTyping != nil && *message.IsTyping
 	h.setTyping(message.From, message.To, isTyping)
 	if client, ok := h.clients[message.To]; ok {
-		h.trySend(client, outbound{
+		h.trySendDrop(client, outbound{
 			response: Response{Messages: []Message{*message}},
 		})
 	}
@@ -221,8 +222,49 @@ func (h *Hub) clearTypingFor(from string) {
 				IsTyping: &isTyping,
 				Date:     time.Now().Unix(),
 			}
-			h.trySend(client, outbound{response: Response{Messages: []Message{message}}})
+			h.trySendDrop(client, outbound{response: Response{Messages: []Message{message}}})
 		}
 	}
 	delete(h.typing, from)
+}
+
+func (h *Hub) clearTypingBetween(from, to string, notify bool) {
+	targets, ok := h.typing[from]
+	if !ok {
+		return
+	}
+	if _, ok := targets[to]; !ok {
+		return
+	}
+	delete(targets, to)
+	if len(targets) == 0 {
+		delete(h.typing, from)
+	}
+	if !notify {
+		return
+	}
+	if client, ok := h.clients[to]; ok {
+		isTyping := false
+		message := Message{
+			From:     from,
+			To:       to,
+			Type:     "typing",
+			IsTyping: &isTyping,
+			Date:     time.Now().Unix(),
+		}
+		h.trySendDrop(client, outbound{response: Response{Messages: []Message{message}}})
+	}
+}
+
+func (h *Hub) trySendDrop(client *Client, message outbound) {
+	select {
+	case <-client.done:
+		delete(h.clients, client.ID)
+		return
+	default:
+	}
+	select {
+	case client.send <- message:
+	default:
+	}
 }

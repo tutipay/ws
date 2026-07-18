@@ -51,12 +51,18 @@ func (c *Client) readPump() {
 		return c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
 	})
 	for {
-		_, messageJSON, err := c.conn.ReadMessage()
+		messageType, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("readPump websocket error: %v", err)
 			}
 			return
+		}
+		if messageType != websocket.TextMessage {
+			if !c.sendProtocolError("bad_frame", "") {
+				return
+			}
+			continue
 		}
 		messageJSON = bytes.TrimSpace(bytes.ReplaceAll(messageJSON, newline, space))
 		frame, err := decodeClientFrame(messageJSON)
@@ -101,7 +107,7 @@ func decodeClientFrame(data []byte) (clientFrame, error) {
 }
 
 func (c *Client) handleMessageFrame(frame clientFrame) bool {
-	if !canonicalMessageID(frame.ID) || !canonicalIdentifier(frame.ToUserID) ||
+	if !canonicalMessageID(frame.ID) || frame.ToUserID <= 0 ||
 		strings.TrimSpace(frame.Text) == "" || frame.IsTyping != nil || len(frame.MessageIDs) != 0 {
 		return c.sendProtocolError("bad_frame", frame.ID)
 	}
@@ -135,7 +141,7 @@ func (c *Client) handleMessageFrame(frame clientFrame) bool {
 }
 
 func (c *Client) handleTypingFrame(frame clientFrame) bool {
-	if frame.ID != "" || !canonicalIdentifier(frame.ToUserID) || frame.Text != "" ||
+	if frame.ID != "" || frame.ToUserID <= 0 || frame.Text != "" ||
 		frame.IsTyping == nil || len(frame.MessageIDs) != 0 {
 		return c.sendProtocolError("bad_frame", frame.ID)
 	}
@@ -151,19 +157,20 @@ func (c *Client) handleTypingFrame(frame clientFrame) bool {
 }
 
 func (c *Client) handleAckFrame(frame clientFrame) bool {
-	if frame.ID != "" || frame.ToUserID != "" || frame.Text != "" || frame.IsTyping != nil {
+	if frame.ID != "" || frame.ToUserID != 0 || frame.Text != "" || frame.IsTyping != nil {
 		return c.sendProtocolError("bad_frame", "")
 	}
 	messageIDs, ok := canonicalMessageIDs(frame.MessageIDs)
 	if !ok {
 		return c.sendProtocolError("bad_frame", "")
 	}
-	if err := markMessagesDelivered(c.Identity, messageIDs, c.db, c.hub.cfg.MarkReadBatch); err != nil {
+	delivered, err := markMessagesDelivered(c.Identity, messageIDs, c.db, c.hub.cfg.MarkReadBatch)
+	if err != nil {
 		return c.sendProtocolError("persistence_unavailable", "")
 	}
 	return c.enqueue(outbound{response: Response{Ack: &Acknowledgement{
 		Kind:       AckKindDelivered,
-		MessageIDs: messageIDs,
+		MessageIDs: delivered,
 	}}})
 }
 
@@ -242,9 +249,8 @@ func (c *Client) writePump() {
 	}
 }
 
-func (c *Client) PreviousMessages() {
-	messages, err := getUnreadMessages(c.Identity, c.hub.cfg.MaxUnreadMessages, c.db)
-	if err != nil || len(messages) == 0 {
+func (c *Client) sendPreviousMessages(messages []Message) {
+	if len(messages) == 0 {
 		return
 	}
 	batchSize := c.hub.cfg.UnreadBatchSize

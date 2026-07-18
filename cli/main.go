@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
@@ -38,9 +39,13 @@ func main() {
 	defer db.Close()
 	cfg := chat.DefaultHubConfig()
 	cfg.ClientIdentityFromRequest = func(r *http.Request) (chat.ClientIdentity, error) {
+		userID, err := strconv.ParseInt(r.URL.Query().Get("userID"), 10, 64)
+		if err != nil {
+			return chat.ClientIdentity{}, chat.ErrBadRequest
+		}
 		return chat.ClientIdentity{
 			TenantID: r.URL.Query().Get("tenantID"),
-			UserID:   r.URL.Query().Get("userID"),
+			UserID:   userID,
 		}, nil
 	}
 	hub := chat.NewHubWithConfig(db, cfg)
@@ -53,7 +58,7 @@ func main() {
 
 	// This is only for testing it's not used in production
 	mux.HandleFunc("/submitContacts", func(w http.ResponseWriter, r *http.Request) {
-		chat.SubmitContacts(chat.ClientIdentity{TenantID: "demo", UserID: "user-a"}, db, w, r)
+		chat.SubmitContacts(chat.ClientIdentity{TenantID: "demo", UserID: 1}, db, w, r)
 	})
 
 	log.Fatal(http.ListenAndServe(":6446", mux))

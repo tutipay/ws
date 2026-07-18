@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
@@ -52,6 +53,10 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if hub.db == nil || hub.db.PingContext(r.Context()) != nil {
+		http.Error(w, ErrPersistenceUnavailable.Error(), http.StatusServiceUnavailable)
+		return
+	}
 
 	conn, err := hub.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -78,15 +83,26 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		client.close()
 		return
 	}
+	backlog, err := getUnreadMessages(identity, hub.cfg.MaxUnreadMessages, hub.db)
+	if err != nil {
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, ErrPersistenceUnavailable.Error()),
+			time.Now().Add(hub.cfg.WriteWait),
+		)
+		hub.unregisterClient(client)
+		client.close()
+		return
+	}
 
 	go client.writePump()
 	go client.readPump()
-	client.PreviousMessages()
+	client.sendPreviousMessages(backlog)
 	client.NotifyStatus("online")
 }
 
 type ContactsRequest struct {
-	UserID string `json:"user_id"`
+	UserID int64 `json:"user_id"`
 }
 
 // SubmitContacts is a small HTTP adapter for applications that already
@@ -104,11 +120,19 @@ func SubmitContacts(currentUser ClientIdentity, db *sqlx.DB, w http.ResponseWrit
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	userIDs := make([]string, 0, len(contacts))
+	userIDs := make([]int64, 0, len(contacts))
 	for _, contact := range contacts {
 		userIDs = append(userIDs, contact.UserID)
 	}
 	if err := AddContacts(r.Context(), currentUser, userIDs, db); err != nil {
+		if errors.Is(err, ErrInvalidContactBatch) || errors.Is(err, ErrInvalidClientIdentity) {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if errors.Is(err, ErrPersistenceUnavailable) {
+			http.Error(w, ErrPersistenceUnavailable.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "could not save contacts", http.StatusInternalServerError)
 		return
 	}

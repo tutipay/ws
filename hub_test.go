@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,7 +26,11 @@ const (
 type sessionContextKey struct{}
 
 func testIdentityResolver(r *http.Request) (ClientIdentity, error) {
-	return ClientIdentity{TenantID: r.Header.Get(testTenantHeader), UserID: r.Header.Get(testUserHeader)}, nil
+	userID, err := strconv.ParseInt(r.Header.Get(testUserHeader), 10, 64)
+	if err != nil {
+		return ClientIdentity{}, ErrBadRequest
+	}
+	return ClientIdentity{TenantID: r.Header.Get(testTenantHeader), UserID: userID}, nil
 }
 
 func newSocketServer(t *testing.T, db *sqlx.DB, configure func(*HubConfig)) (*Hub, string) {
@@ -52,7 +57,7 @@ func dialIdentity(t *testing.T, wsURL string, identity ClientIdentity) *websocke
 	t.Helper()
 	headers := http.Header{}
 	headers.Set(testTenantHeader, identity.TenantID)
-	headers.Set(testUserHeader, identity.UserID)
+	headers.Set(testUserHeader, strconv.FormatInt(identity.UserID, 10))
 	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
 	if err != nil {
 		t.Fatalf("dial %#v: response=%v error=%v", identity, response, err)
@@ -61,7 +66,7 @@ func dialIdentity(t *testing.T, wsURL string, identity ClientIdentity) *websocke
 	return conn
 }
 
-func sendMessage(t *testing.T, conn *websocket.Conn, id, to, text string) {
+func sendMessage(t *testing.T, conn *websocket.Conn, id string, to int64, text string) {
 	t.Helper()
 	if err := conn.WriteJSON(map[string]any{
 		"type": FrameTypeMessage, "id": id, "to_user_id": to, "text": text,
@@ -95,7 +100,27 @@ func requireAck(t *testing.T, response Response, kind, id string) {
 	}
 }
 
-func requireMessage(t *testing.T, response Response, id, from, to, text string) Message {
+func requireAckEventually(t *testing.T, conn *websocket.Conn, kind, id string) {
+	t.Helper()
+	for range 10 {
+		response := readResponse(t, conn)
+		if response.Ack != nil {
+			requireAck(t, response, kind, id)
+			return
+		}
+		if len(response.Messages) == 0 {
+			t.Fatalf("unexpected response before ACK: %#v", response)
+		}
+		for _, message := range response.Messages {
+			if message.ID != id {
+				t.Fatalf("unexpected message before ACK: %#v", response)
+			}
+		}
+	}
+	t.Fatal("ACK did not arrive")
+}
+
+func requireMessage(t *testing.T, response Response, id string, from, to int64, text string) Message {
 	t.Helper()
 	if len(response.Messages) != 1 {
 		t.Fatalf("messages = %#v, want one", response)
@@ -119,47 +144,53 @@ func assertNoFrame(t *testing.T, conn *websocket.Conn) {
 func TestServeWs_MessageRequiresRecipientAck(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "sender"))
-	recipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "recipient"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 2))
 	id := uuid.NewString()
 
-	sendMessage(t, sender, id, "recipient", "hello")
+	sendMessage(t, sender, id, 2, "hello")
 	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
-	requireMessage(t, readResponse(t, recipient), id, "sender", "recipient", "hello")
+	requireMessage(t, readResponse(t, recipient), id, 1, 2, "hello")
 
-	unread, err := getUnreadMessages(testIdentity("tenant-alpha", "recipient"), 0, db)
+	unread, err := getUnreadMessages(testIdentity("tenant-alpha", 2), 0, db)
 	if err != nil || len(unread) != 1 {
 		t.Fatalf("unread before recipient ack = %#v, %v", unread, err)
 	}
 	sendAck(t, recipient, id)
-	requireAck(t, readResponse(t, recipient), AckKindDelivered, id)
-	unread, err = getUnreadMessages(testIdentity("tenant-alpha", "recipient"), 0, db)
+	requireAckEventually(t, recipient, AckKindDelivered, id)
+	unread, err = getUnreadMessages(testIdentity("tenant-alpha", 2), 0, db)
 	if err != nil || len(unread) != 0 {
 		t.Fatalf("unread after recipient ack = %#v, %v", unread, err)
 	}
 }
 
-func TestServeWs_SameUserIDsAndMessageIDCoexistAcrossTenants(t *testing.T) {
+func TestServeWs_SameNumericUserIDsAreFullyTenantScoped(t *testing.T) {
+	t.Run("messages and acknowledgements", testTenantScopedMessagesAndAcknowledgements)
+	t.Run("typing", testTenantScopedTyping)
+	t.Run("presence", testTenantScopedPresence)
+}
+
+func testTenantScopedMessagesAndAcknowledgements(t *testing.T) {
 	db := newTestDB(t)
 	hub, wsURL := newSocketServer(t, db, nil)
-	alphaSender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-sender"))
-	alphaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-recipient"))
-	betaSender := dialIdentity(t, wsURL, testIdentity("tenant-beta", "same-sender"))
-	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", "same-recipient"))
+	alphaSender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
+	alphaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 2))
+	betaSender := dialIdentity(t, wsURL, testIdentity("tenant-beta", 1))
+	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", 2))
 	waitForClientCount(t, hub, 4)
 	id := uuid.NewString()
 
-	sendMessage(t, alphaSender, id, "same-recipient", "alpha-only")
-	sendMessage(t, betaSender, id, "same-recipient", "beta-only")
+	sendMessage(t, alphaSender, id, 2, "alpha-only")
+	sendMessage(t, betaSender, id, 2, "beta-only")
 	requireAck(t, readResponse(t, alphaSender), AckKindPersisted, id)
 	requireAck(t, readResponse(t, betaSender), AckKindPersisted, id)
-	requireMessage(t, readResponse(t, alphaRecipient), id, "same-sender", "same-recipient", "alpha-only")
-	requireMessage(t, readResponse(t, betaRecipient), id, "same-sender", "same-recipient", "beta-only")
+	requireMessage(t, readResponse(t, alphaRecipient), id, 1, 2, "alpha-only")
+	requireMessage(t, readResponse(t, betaRecipient), id, 1, 2, "beta-only")
 
 	sendAck(t, alphaRecipient, id)
-	requireAck(t, readResponse(t, alphaRecipient), AckKindDelivered, id)
-	alphaUnread, _ := getUnreadMessages(testIdentity("tenant-alpha", "same-recipient"), 0, db)
-	betaUnread, _ := getUnreadMessages(testIdentity("tenant-beta", "same-recipient"), 0, db)
+	requireAckEventually(t, alphaRecipient, AckKindDelivered, id)
+	alphaUnread, _ := getUnreadMessages(testIdentity("tenant-alpha", 2), 0, db)
+	betaUnread, _ := getUnreadMessages(testIdentity("tenant-beta", 2), 0, db)
 	if len(alphaUnread) != 0 || len(betaUnread) != 1 || betaUnread[0].Text != "beta-only" {
 		t.Fatalf("cross-tenant ack: alpha=%#v beta=%#v", alphaUnread, betaUnread)
 	}
@@ -168,11 +199,11 @@ func TestServeWs_SameUserIDsAndMessageIDCoexistAcrossTenants(t *testing.T) {
 func TestServeWs_ReplacementIsTenantScoped(t *testing.T) {
 	db := newTestDB(t)
 	hub, wsURL := newSocketServer(t, db, nil)
-	alphaOld := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-user"))
-	beta := dialIdentity(t, wsURL, testIdentity("tenant-beta", "same-user"))
-	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", "recipient"))
+	alphaOld := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
+	beta := dialIdentity(t, wsURL, testIdentity("tenant-beta", 1))
+	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", 2))
 	waitForClientCount(t, hub, 3)
-	_ = dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-user"))
+	_ = dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
 	waitForClientCount(t, hub, 3)
 
 	_ = alphaOld.SetReadDeadline(time.Now().Add(time.Second))
@@ -181,12 +212,12 @@ func TestServeWs_ReplacementIsTenantScoped(t *testing.T) {
 	}
 	typing := true
 	if err := beta.WriteJSON(map[string]any{
-		"type": FrameTypeTyping, "to_user_id": "recipient", "is_typing": typing,
+		"type": FrameTypeTyping, "to_user_id": 2, "is_typing": typing,
 	}); err != nil {
 		t.Fatalf("beta typing after alpha replacement: %v", err)
 	}
 	response := readResponse(t, betaRecipient)
-	if len(response.Messages) != 1 || response.Messages[0].FromUserID != "same-user" || response.Messages[0].IsTyping == nil || !*response.Messages[0].IsTyping {
+	if len(response.Messages) != 1 || response.Messages[0].FromUserID != 1 || response.Messages[0].IsTyping == nil || !*response.Messages[0].IsTyping {
 		t.Fatalf("beta typing response = %#v", response)
 	}
 }
@@ -194,10 +225,10 @@ func TestServeWs_ReplacementIsTenantScoped(t *testing.T) {
 func TestServeWs_RejectsForgedServerFields(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "sender"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
 	id := uuid.NewString()
 	if err := sender.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(
-		`{"type":"message","id":%q,"to_user_id":"recipient","text":"forged","tenant_id":"tenant-beta","from_user_id":"attacker","date":1,"is_delivered":true}`,
+		`{"type":"message","id":%q,"to_user_id":2,"text":"forged","tenant_id":"tenant-beta","from_user_id":99,"date":1,"is_delivered":true}`,
 		id,
 	))); err != nil {
 		t.Fatalf("write forged frame: %v", err)
@@ -212,28 +243,28 @@ func TestServeWs_RejectsForgedServerFields(t *testing.T) {
 	}
 
 	// A rejected frame does not poison the authenticated socket.
-	recipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "recipient"))
-	sendMessage(t, sender, id, "recipient", "server-authored")
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 2))
+	sendMessage(t, sender, id, 2, "server-authored")
 	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
-	requireMessage(t, readResponse(t, recipient), id, "sender", "recipient", "server-authored")
+	requireMessage(t, readResponse(t, recipient), id, 1, 2, "server-authored")
 }
 
 func TestServeWs_ExactRetryAndChangedPayloadConflict(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
-	recipient := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant", 2))
 	id := uuid.NewString()
 
-	sendMessage(t, sender, id, "recipient", "once")
+	sendMessage(t, sender, id, 2, "once")
 	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
-	requireMessage(t, readResponse(t, recipient), id, "sender", "recipient", "once")
+	requireMessage(t, readResponse(t, recipient), id, 1, 2, "once")
 	sendAck(t, recipient, id)
-	requireAck(t, readResponse(t, recipient), AckKindDelivered, id)
+	requireAckEventually(t, recipient, AckKindDelivered, id)
 
-	sendMessage(t, sender, id, "recipient", "once")
+	sendMessage(t, sender, id, 2, "once")
 	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
-	sendMessage(t, sender, id, "recipient", "changed")
+	sendMessage(t, sender, id, 2, "changed")
 	response := readResponse(t, sender)
 	if response.Error == nil || response.Error.Code != "message_conflict" || response.Error.MessageID != id {
 		t.Fatalf("changed retry response = %#v", response)
@@ -252,14 +283,14 @@ func TestServeWs_ExactRetryAndChangedPayloadConflict(t *testing.T) {
 func TestServeWs_ExactRetryBeforeRecipientAckRedeliversOnePersistedRow(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
-	recipient := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant", 2))
 	id := uuid.NewString()
 
 	for range 2 {
-		sendMessage(t, sender, id, "recipient", "safe-redelivery")
+		sendMessage(t, sender, id, 2, "safe-redelivery")
 		requireAck(t, readResponse(t, sender), AckKindPersisted, id)
-		requireMessage(t, readResponse(t, recipient), id, "sender", "recipient", "safe-redelivery")
+		requireMessage(t, readResponse(t, recipient), id, 1, 2, "safe-redelivery")
 	}
 	var count int
 	if err := db.Get(&count, `SELECT count(*) FROM chats_v2 WHERE tenant_id = ? AND id = ?`, "tenant", id); err != nil || count != 1 {
@@ -269,23 +300,110 @@ func TestServeWs_ExactRetryBeforeRecipientAckRedeliversOnePersistedRow(t *testin
 
 func TestServeWs_MessageFailsClosedWithoutPersistence(t *testing.T) {
 	_, wsURL := newSocketServer(t, nil, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
-	recipient := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
-	id := uuid.NewString()
-	sendMessage(t, sender, id, "recipient", "must-not-be-ephemeral")
-	response := readResponse(t, sender)
-	if response.Error == nil || response.Error.Code != "persistence_unavailable" || response.Error.MessageID != id {
-		t.Fatalf("missing persistence response = %#v", response)
+	headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"1"}}
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if conn != nil {
+		_ = conn.Close()
 	}
-	assertNoFrame(t, recipient)
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("missing persistence response=%v error=%v", response, err)
+	}
+}
+
+func TestServeWs_RejectsReconnectWhenPersistenceGoesOffline(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	first := dialIdentity(t, wsURL, testIdentity("tenant", 1))
+	_ = first.Close()
+	if err := db.Close(); err != nil {
+		t.Fatalf("close persistence: %v", err)
+	}
+	headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"1"}}
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("persistence outage response=%v error=%v", response, err)
+	}
+}
+
+func TestServeWs_ClosesWhenBacklogQueryFailsAfterUpgrade(t *testing.T) {
+	db, err := sqlx.Connect("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open incomplete database: %v", err)
+	}
+	defer db.Close()
+	_, wsURL := newSocketServer(t, db, nil)
+	headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"1"}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("upgrade before backlog check: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err = conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
+		t.Fatalf("backlog failure close = %v", err)
+	}
+}
+
+func TestServeWs_AcknowledgesOnlyOwnedMessages(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant", 2))
+	stranger := dialIdentity(t, wsURL, testIdentity("tenant", 3))
+	id := uuid.NewString()
+	missingID := uuid.NewString()
+	sendMessage(t, sender, id, 2, "owned")
+	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
+	requireMessage(t, readResponse(t, recipient), id, 1, 2, "owned")
+
+	sendAck(t, stranger, id, missingID)
+	foreign := readResponse(t, stranger)
+	if foreign.Ack == nil || foreign.Ack.Kind != AckKindDelivered || len(foreign.Ack.MessageIDs) != 0 {
+		t.Fatalf("foreign ACK response = %#v", foreign)
+	}
+	unread, _ := getUnreadMessages(testIdentity("tenant", 2), 0, db)
+	if len(unread) != 1 {
+		t.Fatalf("foreign ACK changed delivery: %#v", unread)
+	}
+
+	sendAck(t, recipient, missingID, id)
+	requireAckEventually(t, recipient, AckKindDelivered, id)
+}
+
+func TestServeWs_RejectsBinaryAndTrailingFrames(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
+	id := uuid.NewString()
+	payload := fmt.Sprintf(`{"type":"message","id":%q,"to_user_id":2,"text":"invalid"}`, id)
+	if err := sender.WriteMessage(websocket.BinaryMessage, []byte(payload)); err != nil {
+		t.Fatalf("write binary frame: %v", err)
+	}
+	if response := readResponse(t, sender); response.Error == nil || response.Error.Code != "bad_frame" {
+		t.Fatalf("binary frame response = %#v", response)
+	}
+	if err := sender.WriteMessage(websocket.TextMessage, []byte(payload+` {}`)); err != nil {
+		t.Fatalf("write trailing frame: %v", err)
+	}
+	if response := readResponse(t, sender); response.Error == nil || response.Error.Code != "bad_frame" {
+		t.Fatalf("trailing frame response = %#v", response)
+	}
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM chats_v2`); err != nil || count != 0 {
+		t.Fatalf("invalid frames persisted: count=%d error=%v", count, err)
+	}
 }
 
 func TestServeWs_RejectsNonCanonicalMessageID(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
 	uppercaseID := strings.ToUpper(uuid.NewString())
-	sendMessage(t, sender, uppercaseID, "recipient", "invalid-id")
+	sendMessage(t, sender, uppercaseID, 2, "invalid-id")
 	response := readResponse(t, sender)
 	if response.Error == nil || response.Error.Code != "bad_frame" {
 		t.Fatalf("non-canonical UUID response = %#v", response)
@@ -299,59 +417,66 @@ func TestServeWs_RejectsNonCanonicalMessageID(t *testing.T) {
 func TestServeWs_OfflineBacklogRemainsUntilAck(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", 1))
 	id := uuid.NewString()
-	sendMessage(t, sender, id, "recipient", "offline")
+	sendMessage(t, sender, id, 2, "offline")
 	requireAck(t, readResponse(t, sender), AckKindPersisted, id)
 
-	first := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
-	requireMessage(t, readResponse(t, first), id, "sender", "recipient", "offline")
+	first := dialIdentity(t, wsURL, testIdentity("tenant", 2))
+	requireMessage(t, readResponse(t, first), id, 1, 2, "offline")
 	_ = first.Close()
 
-	second := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
-	requireMessage(t, readResponse(t, second), id, "sender", "recipient", "offline")
+	second := dialIdentity(t, wsURL, testIdentity("tenant", 2))
+	requireMessage(t, readResponse(t, second), id, 1, 2, "offline")
 	sendAck(t, second, id)
-	requireAck(t, readResponse(t, second), AckKindDelivered, id)
+	requireAckEventually(t, second, AckKindDelivered, id)
 	_ = second.Close()
 
-	third := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
+	third := dialIdentity(t, wsURL, testIdentity("tenant", 2))
 	assertNoFrame(t, third)
 }
 
-func TestServeWs_TypingCannotCrossTenant(t *testing.T) {
+func testTenantScopedTyping(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)
-	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "sender"))
-	alphaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-recipient"))
-	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", "same-recipient"))
+	sender := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
+	_ = dialIdentity(t, wsURL, testIdentity("tenant-beta", 1))
+	alphaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 2))
+	betaRecipient := dialIdentity(t, wsURL, testIdentity("tenant-beta", 2))
 	if err := sender.WriteJSON(map[string]any{
-		"type": FrameTypeTyping, "to_user_id": "same-recipient", "is_typing": true,
+		"type": FrameTypeTyping, "to_user_id": 2, "is_typing": true,
 	}); err != nil {
 		t.Fatalf("send typing: %v", err)
 	}
 	response := readResponse(t, alphaRecipient)
-	if len(response.Messages) != 1 || response.Messages[0].FromUserID != "sender" || response.Messages[0].IsTyping == nil || !*response.Messages[0].IsTyping {
+	if len(response.Messages) != 1 || response.Messages[0].FromUserID != 1 || response.Messages[0].IsTyping == nil || !*response.Messages[0].IsTyping {
 		t.Fatalf("alpha typing = %#v", response)
 	}
 	assertNoFrame(t, betaRecipient)
 }
 
-func TestServeWs_PresenceCannotCrossTenant(t *testing.T) {
+func testTenantScopedPresence(t *testing.T) {
 	db := newTestDB(t)
-	if err := AddContacts(context.Background(), testIdentity("tenant-alpha", "observer"), []string{"same-subject"}, db); err != nil {
+	if err := AddContacts(context.Background(), testIdentity("tenant-alpha", 1), []int64{2}, db); err != nil {
 		t.Fatalf("add alpha contact: %v", err)
 	}
-	if err := AddContacts(context.Background(), testIdentity("tenant-beta", "observer"), []string{"same-subject"}, db); err != nil {
+	if err := AddContacts(context.Background(), testIdentity("tenant-beta", 1), []int64{2}, db); err != nil {
 		t.Fatalf("add beta contact: %v", err)
 	}
 	_, wsURL := newSocketServer(t, db, nil)
-	alphaObserver := dialIdentity(t, wsURL, testIdentity("tenant-alpha", "observer"))
-	betaObserver := dialIdentity(t, wsURL, testIdentity("tenant-beta", "observer"))
-	_ = dialIdentity(t, wsURL, testIdentity("tenant-alpha", "same-subject"))
-	response := readResponse(t, alphaObserver)
-	if response.Status == nil || response.Status.UserID != "same-subject" || response.Status.ConnectionStatus != "online" {
-		t.Fatalf("alpha presence = %#v", response)
+	alphaObserver := dialIdentity(t, wsURL, testIdentity("tenant-alpha", 1))
+	betaObserver := dialIdentity(t, wsURL, testIdentity("tenant-beta", 1))
+	_ = dialIdentity(t, wsURL, testIdentity("tenant-alpha", 2))
+	_ = dialIdentity(t, wsURL, testIdentity("tenant-beta", 2))
+	alphaResponse := readResponse(t, alphaObserver)
+	if alphaResponse.Status == nil || alphaResponse.Status.UserID != 2 || alphaResponse.Status.ConnectionStatus != "online" {
+		t.Fatalf("alpha presence = %#v", alphaResponse)
 	}
+	betaResponse := readResponse(t, betaObserver)
+	if betaResponse.Status == nil || betaResponse.Status.UserID != 2 || betaResponse.Status.ConnectionStatus != "online" {
+		t.Fatalf("beta presence = %#v", betaResponse)
+	}
+	assertNoFrame(t, alphaObserver)
 	assertNoFrame(t, betaObserver)
 }
 
@@ -372,6 +497,34 @@ func TestServeWs_RequiresTrustedIdentityResolver(t *testing.T) {
 	}
 }
 
+func TestServeWs_RequiresPositiveNumericUserIdentity(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	for _, test := range []struct {
+		name       string
+		tenant     string
+		user       string
+		wantStatus int
+	}{
+		{name: "zero", tenant: "tenant", user: "0", wantStatus: http.StatusUnauthorized},
+		{name: "negative", tenant: "tenant", user: "-1", wantStatus: http.StatusUnauthorized},
+		{name: "not numeric", tenant: "tenant", user: "user", wantStatus: http.StatusBadRequest},
+		{name: "overflow", tenant: "tenant", user: "9223372036854775808", wantStatus: http.StatusBadRequest},
+		{name: "blank tenant", tenant: "", user: "1", wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{testTenantHeader: []string{test.tenant}, testUserHeader: []string{test.user}}
+			conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if err == nil || response == nil || response.StatusCode != test.wantStatus {
+				t.Fatalf("response=%v error=%v, want HTTP %d", response, err, test.wantStatus)
+			}
+		})
+	}
+}
+
 func TestServeWs_RejectsInvalidInitialSession(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -382,10 +535,10 @@ func TestServeWs_RejectsInvalidInitialSession(t *testing.T) {
 		{name: "unavailable", validation: ErrSessionValidationUnavailable, wantStatus: http.StatusServiceUnavailable},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, wsURL := newSocketServer(t, nil, func(cfg *HubConfig) {
+			_, wsURL := newSocketServer(t, newTestDB(t), func(cfg *HubConfig) {
 				cfg.ValidateClientSession = func(context.Context) error { return tt.validation }
 			})
-			headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"user"}}
+			headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"1"}}
 			conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
 			if conn != nil {
 				_ = conn.Close()
@@ -423,7 +576,7 @@ func TestServeWs_ClosesRevokedSession(t *testing.T) {
 				}
 				return nil
 			}
-			hub := NewHubWithConfig(nil, cfg)
+			hub := NewHubWithConfig(newTestDB(t), cfg)
 			go hub.Run()
 			defer hub.Stop()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +584,7 @@ func TestServeWs_ClosesRevokedSession(t *testing.T) {
 				ServeWs(hub, w, r.WithContext(ctx))
 			}))
 			defer server.Close()
-			headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"user"}}
+			headers := http.Header{testTenantHeader: []string{"tenant"}, testUserHeader: []string{"1"}}
 			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), headers)
 			if err != nil {
 				t.Fatalf("dial websocket: %v", err)
@@ -454,7 +607,7 @@ func TestServeWs_CancelsValidationWhenClientDisconnects(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
 	var validations atomic.Int32
-	_, wsURL := newSocketServer(t, nil, func(cfg *HubConfig) {
+	_, wsURL := newSocketServer(t, newTestDB(t), func(cfg *HubConfig) {
 		cfg.SessionValidationInterval = 10 * time.Millisecond
 		cfg.ValidateClientSession = func(ctx context.Context) error {
 			if validations.Add(1) == 1 {
@@ -466,7 +619,7 @@ func TestServeWs_CancelsValidationWhenClientDisconnects(t *testing.T) {
 			return ctx.Err()
 		}
 	})
-	conn := dialIdentity(t, wsURL, testIdentity("tenant", "user"))
+	conn := dialIdentity(t, wsURL, testIdentity("tenant", 1))
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -494,8 +647,8 @@ func TestHub_ConcurrentTenantRouting(t *testing.T) {
 	for index := range tenants {
 		tenant := fmt.Sprintf("tenant-%d", index)
 		pairs = append(pairs, pair{
-			sender:    dialIdentity(t, wsURL, testIdentity(tenant, "same-sender")),
-			recipient: dialIdentity(t, wsURL, testIdentity(tenant, "same-recipient")),
+			sender:    dialIdentity(t, wsURL, testIdentity(tenant, 1)),
+			recipient: dialIdentity(t, wsURL, testIdentity(tenant, 2)),
 			tenant:    tenant, id: uuid.NewString(),
 		})
 	}
@@ -505,14 +658,14 @@ func TestHub_ConcurrentTenantRouting(t *testing.T) {
 		go func(item pair) {
 			defer writes.Done()
 			_ = item.sender.WriteJSON(map[string]any{
-				"type": FrameTypeMessage, "id": item.id, "to_user_id": "same-recipient", "text": item.tenant,
+				"type": FrameTypeMessage, "id": item.id, "to_user_id": 2, "text": item.tenant,
 			})
 		}(pairs[index])
 	}
 	writes.Wait()
 	for _, item := range pairs {
 		requireAck(t, readResponse(t, item.sender), AckKindPersisted, item.id)
-		requireMessage(t, readResponse(t, item.recipient), item.id, "same-sender", "same-recipient", item.tenant)
+		requireMessage(t, readResponse(t, item.recipient), item.id, 1, 2, item.tenant)
 	}
 }
 

@@ -55,11 +55,11 @@ func runMigrations(db *sqlx.DB, migrationsPath string) error {
 	return nil
 }
 
-func testIdentity(tenant, user string) ClientIdentity {
+func testIdentity(tenant string, user int64) ClientIdentity {
 	return ClientIdentity{TenantID: tenant, UserID: user}
 }
 
-func testMessage(tenant, from, to, text string) Message {
+func testMessage(tenant string, from, to int64, text string) Message {
 	return Message{
 		TenantID: tenant, ID: uuid.NewString(), FromUserID: from, ToUserID: to,
 		Text: text, Date: time.Now().UTC().Unix(), Type: FrameTypeMessage,
@@ -69,9 +69,9 @@ func testMessage(tenant, from, to, text string) Message {
 func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 	db := newTestDB(t)
 	sharedID := uuid.NewString()
-	alpha := testMessage("tenant-alpha", "sender", "same-user", "alpha")
+	alpha := testMessage("tenant-alpha", 1, 2, "alpha")
 	alpha.ID = sharedID
-	beta := testMessage("tenant-beta", "sender", "same-user", "beta")
+	beta := testMessage("tenant-beta", 1, 2, "beta")
 	beta.ID = sharedID
 
 	if _, err := insert(alpha, db); err != nil {
@@ -81,11 +81,11 @@ func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 		t.Fatalf("insert beta: %v", err)
 	}
 
-	alphaUnread, err := getUnreadMessages(testIdentity("tenant-alpha", "same-user"), 0, db)
+	alphaUnread, err := getUnreadMessages(testIdentity("tenant-alpha", 2), 0, db)
 	if err != nil {
 		t.Fatalf("alpha unread: %v", err)
 	}
-	betaUnread, err := getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	betaUnread, err := getUnreadMessages(testIdentity("tenant-beta", 2), 0, db)
 	if err != nil {
 		t.Fatalf("beta unread: %v", err)
 	}
@@ -96,18 +96,22 @@ func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 		t.Fatalf("beta unread = %#v", betaUnread)
 	}
 
-	if err := markMessagesDelivered(testIdentity("tenant-alpha", "same-user"), []string{sharedID}, db, 1); err != nil {
+	if _, err := markMessagesDelivered(testIdentity("tenant-alpha", 2), []string{sharedID}, db, 1); err != nil {
 		t.Fatalf("mark alpha delivered: %v", err)
 	}
-	alphaUnread, _ = getUnreadMessages(testIdentity("tenant-alpha", "same-user"), 0, db)
-	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	alphaUnread, _ = getUnreadMessages(testIdentity("tenant-alpha", 2), 0, db)
+	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", 2), 0, db)
 	if len(alphaUnread) != 0 || len(betaUnread) != 1 {
 		t.Fatalf("cross-tenant delivery mutation: alpha=%d beta=%d", len(alphaUnread), len(betaUnread))
 	}
-	if err := markMessagesDelivered(testIdentity("tenant-beta", "different-user"), []string{sharedID}, db, 1); err != nil {
+	foreignAck, err := markMessagesDelivered(testIdentity("tenant-beta", 3), []string{sharedID}, db, 1)
+	if err != nil {
 		t.Fatalf("mark foreign recipient delivered: %v", err)
 	}
-	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	if len(foreignAck) != 0 {
+		t.Fatalf("foreign recipient was falsely acknowledged: %#v", foreignAck)
+	}
+	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", 2), 0, db)
 	if len(betaUnread) != 1 {
 		t.Fatalf("foreign recipient marked message delivered: %#v", betaUnread)
 	}
@@ -115,7 +119,7 @@ func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 
 func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 	db := newTestDB(t)
-	message := testMessage("tenant-alpha", "sender", "recipient", "hello")
+	message := testMessage("tenant-alpha", 1, 2, "hello")
 
 	first, err := insert(message, db)
 	if err != nil || !first.Created {
@@ -131,9 +135,9 @@ func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 	changedText := message
 	changedText.Text = "changed"
 	changedRecipient := message
-	changedRecipient.ToUserID = "other-recipient"
+	changedRecipient.ToUserID = 3
 	changedSender := message
-	changedSender.FromUserID = "other-sender"
+	changedSender.FromUserID = 4
 	for _, changed := range []Message{changedText, changedRecipient, changedSender} {
 		if _, err := insert(changed, db); !errors.Is(err, ErrMessageConflict) {
 			t.Fatalf("changed retry %#v error = %v, want %v", changed, err, ErrMessageConflict)
@@ -150,7 +154,7 @@ func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 
 func TestPersistence_ConcurrentExactRetryCreatesOneRow(t *testing.T) {
 	db := newTestDB(t)
-	message := testMessage("tenant", "sender", "recipient", "hello")
+	message := testMessage("tenant", 1, 2, "hello")
 	const callers = 16
 	start := make(chan struct{})
 	var created atomic.Int32
@@ -187,20 +191,20 @@ func TestPersistence_ConcurrentExactRetryCreatesOneRow(t *testing.T) {
 
 func TestContacts_AreStableAndTenantScoped(t *testing.T) {
 	db := newTestDB(t)
-	alphaOwner := testIdentity("tenant-alpha", "owner")
-	betaOwner := testIdentity("tenant-beta", "owner")
-	if err := AddContacts(context.Background(), alphaOwner, []string{"shared-contact", "shared-contact", "owner"}, db); err != nil {
+	alphaOwner := testIdentity("tenant-alpha", 1)
+	betaOwner := testIdentity("tenant-beta", 1)
+	if err := AddContacts(context.Background(), alphaOwner, []int64{2, 2, 1}, db); err != nil {
 		t.Fatalf("add alpha contacts: %v", err)
 	}
-	if err := AddContacts(context.Background(), betaOwner, []string{"shared-contact"}, db); err != nil {
+	if err := AddContacts(context.Background(), betaOwner, []int64{2}, db); err != nil {
 		t.Fatalf("add beta contacts: %v", err)
 	}
 
-	alpha, err := getContactOwners(testIdentity("tenant-alpha", "shared-contact"), db)
+	alpha, err := getContactOwners(testIdentity("tenant-alpha", 2), db)
 	if err != nil {
 		t.Fatalf("alpha contact owners: %v", err)
 	}
-	beta, err := getContactOwners(testIdentity("tenant-beta", "shared-contact"), db)
+	beta, err := getContactOwners(testIdentity("tenant-beta", 2), db)
 	if err != nil {
 		t.Fatalf("beta contact owners: %v", err)
 	}
@@ -209,12 +213,38 @@ func TestContacts_AreStableAndTenantScoped(t *testing.T) {
 	}
 }
 
+func TestContacts_RejectInvalidBatchShapes(t *testing.T) {
+	db := newTestDB(t)
+	owner := testIdentity("tenant", 1)
+	tooMany := make([]int64, maxContactsPerRequest+1)
+	for index := range tooMany {
+		tooMany[index] = int64(index + 2)
+	}
+	for name, contacts := range map[string][]int64{
+		"empty":     nil,
+		"too many":  tooMany,
+		"zero":      {0},
+		"negative":  {-1},
+		"self only": {1, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := AddContacts(context.Background(), owner, contacts, db); !errors.Is(err, ErrInvalidContactBatch) {
+				t.Fatalf("AddContacts(%v) error = %v", contacts, err)
+			}
+		})
+	}
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM contacts_v2`); err != nil || count != 0 {
+		t.Fatalf("invalid contacts persisted: count=%d error=%v", count, err)
+	}
+}
+
 func TestPersistence_RejectsMissingDatabase(t *testing.T) {
-	message := testMessage("tenant", "sender", "recipient", "hello")
+	message := testMessage("tenant", 1, 2, "hello")
 	if _, err := insert(message, nil); !errors.Is(err, ErrPersistenceUnavailable) {
 		t.Fatalf("insert nil error = %v", err)
 	}
-	if err := markMessagesDelivered(testIdentity("tenant", "recipient"), []string{message.ID}, nil, 1); !errors.Is(err, ErrPersistenceUnavailable) {
+	if _, err := markMessagesDelivered(testIdentity("tenant", 2), []string{message.ID}, nil, 1); !errors.Is(err, ErrPersistenceUnavailable) {
 		t.Fatalf("mark nil error = %v", err)
 	}
 }

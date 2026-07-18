@@ -24,17 +24,17 @@ var ErrInvalidClientIdentity = errors.New("invalid client identity")
 // frames.
 type ClientIdentity struct {
 	TenantID string `json:"-"`
-	UserID   string `json:"-"`
+	UserID   int64  `json:"-"`
 }
 
 func (identity ClientIdentity) validate() error {
-	if !canonicalIdentifier(identity.TenantID) || !canonicalIdentifier(identity.UserID) {
+	if !canonicalTenantID(identity.TenantID) || identity.UserID <= 0 {
 		return ErrInvalidClientIdentity
 	}
 	return nil
 }
 
-func canonicalIdentifier(value string) bool {
+func canonicalTenantID(value string) bool {
 	if value == "" || value != strings.TrimSpace(value) || len(value) > 128 || !utf8.ValidString(value) {
 		return false
 	}
@@ -52,8 +52,8 @@ func canonicalIdentifier(value string) bool {
 type Message struct {
 	TenantID   string `db:"tenant_id" json:"-"`
 	ID         string `db:"id" json:"id,omitempty"`
-	FromUserID string `db:"from_user_id" json:"from_user_id"`
-	ToUserID   string `db:"to_user_id" json:"to_user_id"`
+	FromUserID int64  `db:"from_user_id" json:"from_user_id"`
+	ToUserID   int64  `db:"to_user_id" json:"to_user_id"`
 	Text       string `db:"text" json:"text,omitempty"`
 	Date       int64  `db:"date" json:"date"`
 	Type       string `db:"-" json:"type"`
@@ -73,7 +73,7 @@ func (message Message) recipient() ClientIdentity {
 // StatusResponse reports presence for a stable user ID in the receiver's
 // authenticated tenant.
 type StatusResponse struct {
-	UserID           string `json:"user_id"`
+	UserID           int64  `json:"user_id"`
 	ConnectionStatus string `json:"connection_status"`
 }
 
@@ -98,7 +98,7 @@ type Response struct {
 type clientFrame struct {
 	Type       string   `json:"type"`
 	ID         string   `json:"id"`
-	ToUserID   string   `json:"to_user_id"`
+	ToUserID   int64    `json:"to_user_id"`
 	Text       string   `json:"text"`
 	IsTyping   *bool    `json:"is_typing"`
 	MessageIDs []string `json:"message_ids"`

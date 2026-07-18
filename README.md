@@ -44,7 +44,7 @@ The client creates and durably stores a canonical lowercase UUID before its
 first send:
 
 ```json
-{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","to_user_id":"42","text":"hello"}
+{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","to_user_id":42,"text":"hello"}
 ```
 
 After persistence the sender receives:
@@ -56,7 +56,7 @@ After persistence the sender receives:
 The recipient receives a server-authored message:
 
 ```json
-{"messages":[{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","from_user_id":"41","to_user_id":"42","text":"hello","date":1784450000}]}
+{"messages":[{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","from_user_id":41,"to_user_id":42,"text":"hello","date":1784450000}]}
 ```
 
 Only after writing that message to durable client storage should the recipient
@@ -73,7 +73,7 @@ message ID because a disconnect can cause a safe re-delivery.
 Typing is transient and scoped to the sender's authenticated tenant:
 
 ```json
-{"type":"typing","to_user_id":"42","is_typing":true}
+{"type":"typing","to_user_id":42,"is_typing":true}
 ```
 
 Unknown fields are rejected. In particular, clients cannot submit `tenant_id`,
@@ -99,10 +99,18 @@ entries in the owning identity service, then call `AddContacts` with stable user
 IDs. `SubmitContacts` is only an adapter for already-resolved `user_id` values;
 it never queries or mirrors an identity `users` table.
 
+User IDs are positive 64-bit integers and map to `BIGINT` in PostgreSQL. A
+socket upgrade is rejected with HTTP 503 when persistence is unavailable; if a
+backlog query fails after upgrade, the socket closes with code 1011. Messages
+are never routed through an ephemeral fallback. Presence is deliberately
+best-effort: a contact-query failure suppresses only the status event and never
+changes message persistence or delivery.
+
 ## Migrating from v0.1
 
 - Replace `ClientIDFromRequest` with `ClientIdentityFromRequest`.
-- Replace mobile/string client IDs with `ClientIdentity`.
+- Replace mobile/string client IDs with `ClientIdentity`; `UserID` and all
+  message/contact user IDs are positive `int64` values.
 - Send `to_user_id`, not `to`, and provide a canonical UUID `id`.
 - Read messages from the `Response.messages` envelope using `from_user_id` and
   `to_user_id`.

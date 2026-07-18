@@ -142,9 +142,111 @@ func TestServeWs_TypingEventWithoutType(t *testing.T) {
 }
 
 func TestServeWs_RejectsInvalidInitialSession(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		validation error
+		wantStatus int
+	}{
+		{name: "revoked", validation: errors.New("revoked"), wantStatus: http.StatusUnauthorized},
+		{name: "unavailable", validation: ErrSessionValidationUnavailable, wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultHubConfig()
+			cfg.ValidateClientSession = func(context.Context) error { return tt.validation }
+			hub := NewHubWithConfig(nil, cfg)
+			go hub.Run()
+			defer hub.Stop()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ServeWs(hub, w, r)
+			}))
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+			conn, response, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Fatal("expected websocket upgrade to fail")
+			}
+			if response == nil || response.StatusCode != tt.wantStatus {
+				t.Fatalf("expected HTTP %d, got %#v", tt.wantStatus, response)
+			}
+		})
+	}
+}
+
+func TestServeWs_ClosesRevokedSession(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		validation error
+		wantClose  int
+	}{
+		{name: "revoked", validation: errors.New("revoked"), wantClose: websocket.ClosePolicyViolation},
+		{name: "unavailable", validation: ErrSessionValidationUnavailable, wantClose: websocket.CloseInternalServerErr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var invalid atomic.Bool
+			var validations atomic.Int32
+			cfg := DefaultHubConfig()
+			cfg.PingPeriod = time.Hour
+			cfg.SessionValidationInterval = 10 * time.Millisecond
+			cfg.ValidateClientSession = func(ctx context.Context) error {
+				validations.Add(1)
+				if ctx.Value(sessionContextKey{}) != "session-a" {
+					return errors.New("missing session context")
+				}
+				if invalid.Load() {
+					return tt.validation
+				}
+				return nil
+			}
+			hub := NewHubWithConfig(nil, cfg)
+			go hub.Run()
+			defer hub.Stop()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := context.WithValue(r.Context(), sessionContextKey{}, "session-a")
+				ServeWs(hub, w, r.WithContext(ctx))
+			}))
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+			conn, _, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			defer conn.Close()
+
+			invalid.Store(true)
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			_, _, err = conn.ReadMessage()
+			if !websocket.IsCloseError(err, tt.wantClose) {
+				t.Fatalf("expected close code %d, got %v", tt.wantClose, err)
+			}
+			if validations.Load() < 2 {
+				t.Fatalf("expected initial and periodic validation, got %d calls", validations.Load())
+			}
+		})
+	}
+}
+
+func TestServeWs_CancelsValidationWhenClientDisconnects(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	var validations atomic.Int32
 	cfg := DefaultHubConfig()
-	cfg.ValidateClientSession = func(context.Context) error {
-		return errors.New("revoked")
+	cfg.PingPeriod = time.Hour
+	cfg.SessionValidationInterval = 10 * time.Millisecond
+	cfg.ValidateClientSession = func(ctx context.Context) error {
+		if validations.Add(1) == 1 {
+			return nil
+		}
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return ctx.Err()
 	}
 	hub := NewHubWithConfig(nil, cfg)
 	go hub.Run()
@@ -156,58 +258,19 @@ func TestServeWs_RejectsInvalidInitialSession(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, response, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
-	if conn != nil {
-		conn.Close()
-	}
-	if err == nil {
-		t.Fatal("expected websocket upgrade to fail")
-	}
-	if response == nil || response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected HTTP 401, got %#v", response)
-	}
-}
-
-func TestServeWs_ClosesRevokedSession(t *testing.T) {
-	var revoked atomic.Bool
-	var validations atomic.Int32
-	cfg := DefaultHubConfig()
-	cfg.PingPeriod = time.Hour
-	cfg.SessionValidationInterval = 10 * time.Millisecond
-	cfg.ValidateClientSession = func(ctx context.Context) error {
-		validations.Add(1)
-		if ctx.Value(sessionContextKey{}) != "session-a" {
-			return errors.New("missing session context")
-		}
-		if revoked.Load() {
-			return errors.New("revoked")
-		}
-		return nil
-	}
-	hub := NewHubWithConfig(nil, cfg)
-	go hub.Run()
-	defer hub.Stop()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), sessionContextKey{}, "session-a")
-		ServeWs(hub, w, r.WithContext(ctx))
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
 	if err != nil {
 		t.Fatalf("dial websocket: %v", err)
 	}
-	defer conn.Close()
-
-	revoked.Store(true)
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-	_, _, err = conn.ReadMessage()
-	if !websocket.IsCloseError(err, websocket.ClosePolicyViolation) {
-		t.Fatalf("expected policy-violation close, got %v", err)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("periodic validation did not start")
 	}
-	if validations.Load() < 2 {
-		t.Fatalf("expected initial and periodic validation, got %d calls", validations.Load())
+	_ = conn.Close()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("validation context was not cancelled")
 	}
 }

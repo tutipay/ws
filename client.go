@@ -38,7 +38,8 @@ type Client struct {
 	closeOnce sync.Once
 	replaced  uint32
 
-	sessionContext context.Context
+	sessionContext          context.Context
+	cancelSessionValidation context.CancelFunc
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -139,7 +140,7 @@ func (c *Client) writePump() {
 		if validationTicker != nil {
 			validationTicker.Stop()
 		}
-		c.conn.Close()
+		c.close()
 	}()
 	for {
 		select {
@@ -165,10 +166,11 @@ func (c *Client) writePump() {
 			}
 		case <-validation:
 			if err := c.hub.cfg.ValidateClientSession(c.sessionContext); err != nil {
+				_, closeCode, message := sessionValidationFailure(err)
 				deadline := time.Now().Add(c.hub.cfg.WriteWait)
 				_ = c.conn.WriteControl(
 					websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, ErrUnauthorized.Error()),
+					websocket.FormatCloseMessage(closeCode, message),
 					deadline,
 				)
 				return
@@ -236,6 +238,9 @@ func (c *Client) NotifyStatus(status string) {
 
 func (c *Client) close() {
 	c.closeOnce.Do(func() {
+		if c.cancelSessionValidation != nil {
+			c.cancelSessionValidation()
+		}
 		close(c.done)
 		c.conn.Close()
 	})

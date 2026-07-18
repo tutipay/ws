@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -37,6 +38,12 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "clientID is required", http.StatusBadRequest)
 		return
 	}
+	if hub.cfg.ValidateClientSession != nil {
+		if err := hub.cfg.ValidateClientSession(r.Context()); err != nil {
+			http.Error(w, ErrUnauthorized.Error(), http.StatusUnauthorized)
+			return
+		}
+	}
 
 	conn, err := hub.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -47,12 +54,13 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// Client should have a reference to db, since this is the only way we can inject
 	// the db down there.
 	client := &Client{
-		db:   hub.db,
-		ID:   clientID,
-		hub:  hub,
-		conn: conn,
-		send: make(chan outbound, hub.cfg.ClientSendBuffer),
-		done: make(chan struct{}),
+		db:             hub.db,
+		ID:             clientID,
+		hub:            hub,
+		conn:           conn,
+		send:           make(chan outbound, hub.cfg.ClientSendBuffer),
+		done:           make(chan struct{}),
+		sessionContext: context.WithoutCancel(r.Context()),
 	}
 	if ok := client.hub.registerClient(client); !ok {
 		conn.Close()

@@ -1,14 +1,19 @@
 package chat
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+type sessionContextKey struct{}
 
 func TestServeWs_DirectMessage(t *testing.T) {
 	hub := NewHub(nil)
@@ -133,5 +138,76 @@ func TestServeWs_TypingEventWithoutType(t *testing.T) {
 	}
 	if response.Messages[0].IsTyping == nil || !*response.Messages[0].IsTyping {
 		t.Fatalf("expected is_typing true")
+	}
+}
+
+func TestServeWs_RejectsInvalidInitialSession(t *testing.T) {
+	cfg := DefaultHubConfig()
+	cfg.ValidateClientSession = func(context.Context) error {
+		return errors.New("revoked")
+	}
+	hub := NewHubWithConfig(nil, cfg)
+	go hub.Run()
+	defer hub.Stop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ServeWs(hub, w, r)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected websocket upgrade to fail")
+	}
+	if response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected HTTP 401, got %#v", response)
+	}
+}
+
+func TestServeWs_ClosesRevokedSession(t *testing.T) {
+	var revoked atomic.Bool
+	var validations atomic.Int32
+	cfg := DefaultHubConfig()
+	cfg.PingPeriod = time.Hour
+	cfg.SessionValidationInterval = 10 * time.Millisecond
+	cfg.ValidateClientSession = func(ctx context.Context) error {
+		validations.Add(1)
+		if ctx.Value(sessionContextKey{}) != "session-a" {
+			return errors.New("missing session context")
+		}
+		if revoked.Load() {
+			return errors.New("revoked")
+		}
+		return nil
+	}
+	hub := NewHubWithConfig(nil, cfg)
+	go hub.Run()
+	defer hub.Stop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), sessionContextKey{}, "session-a")
+		ServeWs(hub, w, r.WithContext(ctx))
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"/?clientID=client-a", nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	revoked.Store(true)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err = conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.ClosePolicyViolation) {
+		t.Fatalf("expected policy-violation close, got %v", err)
+	}
+	if validations.Load() < 2 {
+		t.Fatalf("expected initial and periodic validation, got %d calls", validations.Load())
 	}
 }

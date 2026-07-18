@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -36,6 +37,8 @@ type Client struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	replaced  uint32
+
+	sessionContext context.Context
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -124,9 +127,18 @@ func (c *Client) readPump() {
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
 func (c *Client) writePump() {
-	ticker := time.NewTicker(c.hub.cfg.PingPeriod)
+	pingTicker := time.NewTicker(c.hub.cfg.PingPeriod)
+	var validationTicker *time.Ticker
+	var validation <-chan time.Time
+	if c.hub.cfg.ValidateClientSession != nil {
+		validationTicker = time.NewTicker(c.hub.cfg.SessionValidationInterval)
+		validation = validationTicker.C
+	}
 	defer func() {
-		ticker.Stop()
+		pingTicker.Stop()
+		if validationTicker != nil {
+			validationTicker.Stop()
+		}
 		c.conn.Close()
 	}()
 	for {
@@ -146,9 +158,19 @@ func (c *Client) writePump() {
 				}
 			}
 
-		case <-ticker.C:
+		case <-pingTicker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case <-validation:
+			if err := c.hub.cfg.ValidateClientSession(c.sessionContext); err != nil {
+				deadline := time.Now().Add(c.hub.cfg.WriteWait)
+				_ = c.conn.WriteControl(
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, ErrUnauthorized.Error()),
+					deadline,
+				)
 				return
 			}
 		case <-c.done:

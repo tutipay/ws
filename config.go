@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"net/http"
 	"runtime"
 	"time"
@@ -31,6 +32,8 @@ const (
 	defaultMaxUnreadMessages = 200
 	defaultUnreadBatchSize   = 50
 	defaultMarkReadBatch     = 500
+
+	defaultSessionValidationInterval = 30 * time.Second
 )
 
 type HubConfig struct {
@@ -61,6 +64,12 @@ type HubConfig struct {
 	WriteBufferSize     int
 	CheckOrigin         func(*http.Request) bool
 	ClientIDFromRequest func(*http.Request) (string, error)
+
+	// ValidateClientSession is called before the websocket upgrade and
+	// periodically for the lifetime of the connection. A validation error
+	// rejects or closes the connection. Leaving it nil disables validation.
+	ValidateClientSession     func(context.Context) error
+	SessionValidationInterval time.Duration
 }
 
 func DefaultHubConfig() HubConfig {
@@ -170,6 +179,9 @@ func (cfg HubConfig) withDefaults() HubConfig {
 	}
 	if cfg.ClientIDFromRequest == nil {
 		cfg.ClientIDFromRequest = def.ClientIDFromRequest
+	}
+	if cfg.ValidateClientSession != nil && cfg.SessionValidationInterval <= 0 {
+		cfg.SessionValidationInterval = defaultSessionValidationInterval
 	}
 	return cfg
 }

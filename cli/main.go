@@ -36,7 +36,14 @@ func main() {
 		log.Fatalf("error in migrating: %v", err)
 	}
 	defer db.Close()
-	hub := chat.NewHub(db)
+	cfg := chat.DefaultHubConfig()
+	cfg.ClientIdentityFromRequest = func(r *http.Request) (chat.ClientIdentity, error) {
+		return chat.ClientIdentity{
+			TenantID: r.URL.Query().Get("tenantID"),
+			UserID:   r.URL.Query().Get("userID"),
+		}, nil
+	}
+	hub := chat.NewHubWithConfig(db, cfg)
 	go hub.Run()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveHome)
@@ -46,7 +53,7 @@ func main() {
 
 	// This is only for testing it's not used in production
 	mux.HandleFunc("/submitContacts", func(w http.ResponseWriter, r *http.Request) {
-		chat.SubmitContacts("0123456789", db, w, r)
+		chat.SubmitContacts(chat.ClientIdentity{TenantID: "demo", UserID: "user-a"}, db, w, r)
 	})
 
 	log.Fatal(http.ListenAndServe(":6446", mux))

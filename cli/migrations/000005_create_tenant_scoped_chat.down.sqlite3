@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS "idx_contacts_v2_reverse";
+DROP TABLE IF EXISTS "contacts_v2";
+DROP INDEX IF EXISTS "idx_chats_v2_unread";
+DROP TABLE IF EXISTS "chats_v2";

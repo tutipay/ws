@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,20 +21,13 @@ var (
 	space   = []byte{' '}
 )
 
-// Client is a middleman between the websocket connection and the hub.
-// It is important to note that Client should be also
+// Client is one authenticated tenant/user websocket connection.
 type Client struct {
-	ID  string
-	hub *Hub
-
-	// The websocket connection.
-	conn *websocket.Conn
-
-	// Buffered channel of outbound messages.
-	send chan outbound
-
-	// Chat instance to persist the chats
-	db *sqlx.DB
+	Identity ClientIdentity
+	hub      *Hub
+	conn     *websocket.Conn
+	send     chan outbound
+	db       *sqlx.DB
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -42,11 +37,6 @@ type Client struct {
 	cancelSessionValidation context.CancelFunc
 }
 
-// readPump pumps messages from the websocket connection to the hub.
-//
-// The application runs readPump in a per-connection goroutine. The application
-// ensures that there is at most one reader on a connection by executing all
-// reads from this goroutine.
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregisterClient(c)
@@ -58,75 +48,153 @@ func (c *Client) readPump() {
 	c.conn.SetReadLimit(c.hub.cfg.MaxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
-		return nil
+		return c.conn.SetReadDeadline(time.Now().Add(c.hub.cfg.PongWait))
 	})
 	for {
-		// The client should send the message as a JSON string that contains the message text as well
-		// as the message metadata through the websocket connection.
 		_, messageJSON, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("readPump error: %v", err)
+				log.Printf("readPump websocket error: %v", err)
 			}
-			break
+			return
 		}
-
-		messageJSON = bytes.TrimSpace(bytes.Replace(messageJSON, newline, space, -1))
-
-		var message Message
-		// we also need to capture the sender's ID here...
-		if err := json.Unmarshal(messageJSON, &message); err != nil {
-			log.Printf("readPump Unmarshal JSON error: %v", err)
-			continue
-		}
-		if message.IsTyping != nil && message.Type == "" {
-			message.Type = "typing"
-		}
-		if message.Type == "typing" {
-			if message.To == "" {
-				log.Printf("readPump typing validation error: missing to")
-				continue
-			}
-			message.From = c.ID
-			message.Date = time.Now().Unix()
-			if ok := c.hub.broadcastMessage(&message); !ok {
+		messageJSON = bytes.TrimSpace(bytes.ReplaceAll(messageJSON, newline, space))
+		frame, err := decodeClientFrame(messageJSON)
+		if err != nil {
+			if !c.sendProtocolError("bad_frame", "") {
 				return
 			}
 			continue
 		}
-
-		if message.To == "" || message.Text == "" {
-			log.Printf("readPump validation error: missing to or text")
-			continue
+		switch frame.Type {
+		case FrameTypeMessage:
+			if !c.handleMessageFrame(frame) {
+				return
+			}
+		case FrameTypeTyping:
+			if !c.handleTypingFrame(frame) {
+				return
+			}
+		case FrameTypeAck:
+			if !c.handleAckFrame(frame) {
+				return
+			}
+		default:
+			if !c.sendProtocolError("bad_frame", frame.ID) {
+				return
+			}
 		}
-		message.From = c.ID // sender's ID
-		message.Date = time.Now().Unix()
-		// Note that the `To` and `Text` fields are required and if they are not sent with the message metadata
-		// the application will fail.
-
-		// Generating messageID
-		message.ID = uuid.New().String() // TODO: check for the unlikely case of collisions.
-
-		// Persist before broadcast to ensure at-least-once delivery semantics.
-		if err := c.hub.persistMessage(message); err != nil {
-			log.Printf("readPump persist error: %v", err)
-			continue
-		}
-
-		// Populate message with corresponding data (inc: text, from and to) fields
-		if ok := c.hub.broadcastMessage(&message); !ok {
-			return
-		}
-
 	}
 }
 
-// writePump pumps messages from the hub to the websocket connection.
-//
-// A goroutine running writePump is started for each connection. The
-// application ensures that there is at most one writer to a connection by
-// executing all writes from this goroutine.
+func decodeClientFrame(data []byte) (clientFrame, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var frame clientFrame
+	if err := decoder.Decode(&frame); err != nil {
+		return clientFrame{}, err
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return clientFrame{}, err
+	}
+	return frame, nil
+}
+
+func (c *Client) handleMessageFrame(frame clientFrame) bool {
+	if !canonicalMessageID(frame.ID) || !canonicalIdentifier(frame.ToUserID) ||
+		strings.TrimSpace(frame.Text) == "" || frame.IsTyping != nil || len(frame.MessageIDs) != 0 {
+		return c.sendProtocolError("bad_frame", frame.ID)
+	}
+	message := Message{
+		TenantID:   c.Identity.TenantID,
+		ID:         frame.ID,
+		FromUserID: c.Identity.UserID,
+		ToUserID:   frame.ToUserID,
+		Text:       frame.Text,
+		Date:       time.Now().UTC().Unix(),
+		Type:       FrameTypeMessage,
+	}
+	result, err := c.hub.persistMessage(message)
+	if err != nil {
+		if errors.Is(err, ErrMessageConflict) {
+			return c.sendProtocolError("message_conflict", frame.ID)
+		}
+		return c.sendProtocolError("persistence_unavailable", frame.ID)
+	}
+	if !c.enqueue(outbound{response: Response{Ack: &Acknowledgement{
+		Kind:       AckKindPersisted,
+		MessageIDs: []string{frame.ID},
+	}}}) {
+		return false
+	}
+	result.Message.Type = FrameTypeMessage
+	if result.Created || !result.Message.IsDelivered {
+		return c.hub.broadcastMessage(&result.Message)
+	}
+	return true
+}
+
+func (c *Client) handleTypingFrame(frame clientFrame) bool {
+	if frame.ID != "" || !canonicalIdentifier(frame.ToUserID) || frame.Text != "" ||
+		frame.IsTyping == nil || len(frame.MessageIDs) != 0 {
+		return c.sendProtocolError("bad_frame", frame.ID)
+	}
+	message := Message{
+		TenantID:   c.Identity.TenantID,
+		FromUserID: c.Identity.UserID,
+		ToUserID:   frame.ToUserID,
+		Date:       time.Now().UTC().Unix(),
+		Type:       FrameTypeTyping,
+		IsTyping:   frame.IsTyping,
+	}
+	return c.hub.broadcastMessage(&message)
+}
+
+func (c *Client) handleAckFrame(frame clientFrame) bool {
+	if frame.ID != "" || frame.ToUserID != "" || frame.Text != "" || frame.IsTyping != nil {
+		return c.sendProtocolError("bad_frame", "")
+	}
+	messageIDs, ok := canonicalMessageIDs(frame.MessageIDs)
+	if !ok {
+		return c.sendProtocolError("bad_frame", "")
+	}
+	if err := markMessagesDelivered(c.Identity, messageIDs, c.db, c.hub.cfg.MarkReadBatch); err != nil {
+		return c.sendProtocolError("persistence_unavailable", "")
+	}
+	return c.enqueue(outbound{response: Response{Ack: &Acknowledgement{
+		Kind:       AckKindDelivered,
+		MessageIDs: messageIDs,
+	}}})
+}
+
+func canonicalMessageID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil && parsed.String() == value
+}
+
+func canonicalMessageIDs(values []string) ([]string, bool) {
+	if len(values) == 0 || len(values) > 200 {
+		return nil, false
+	}
+	unique := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !canonicalMessageID(value) {
+			return nil, false
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique, true
+}
+
+func (c *Client) sendProtocolError(code, messageID string) bool {
+	return c.enqueue(outbound{response: Response{Error: &ErrorResponse{Code: code, MessageID: messageID}}})
+}
+
 func (c *Client) writePump() {
 	pingTicker := time.NewTicker(c.hub.cfg.PingPeriod)
 	var validationTicker *time.Ticker
@@ -145,33 +213,26 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait))
-
+			if err := c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait)); err != nil {
+				return
+			}
 			if err := c.conn.WriteJSON(message.response); err != nil {
 				return
 			}
-
-			// We need to mark this message as read now, because we already sent it to the client
-			// otherwise it will be sent again.
-			if len(message.markReadIDs) > 0 && c.db != nil {
-				if err := markMessagesAsRead(message.markReadIDs, c.db, c.hub.cfg.MarkReadBatch); err != nil {
-					log.Printf("writePump markMessagesAsRead error: %v", err)
-				}
-			}
-
 		case <-pingTicker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait))
+			if err := c.conn.SetWriteDeadline(time.Now().Add(c.hub.cfg.WriteWait)); err != nil {
+				return
+			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		case <-validation:
 			if err := c.hub.cfg.ValidateClientSession(c.sessionContext); err != nil {
 				_, closeCode, message := sessionValidationFailure(err)
-				deadline := time.Now().Add(c.hub.cfg.WriteWait)
 				_ = c.conn.WriteControl(
 					websocket.CloseMessage,
 					websocket.FormatCloseMessage(closeCode, message),
-					deadline,
+					time.Now().Add(c.hub.cfg.WriteWait),
 				)
 				return
 			}
@@ -181,55 +242,32 @@ func (c *Client) writePump() {
 	}
 }
 
-// PreviousMessages retrieves all messages that were sent to a senderID but they still didn't
-// Read it.
-// We will need to have a reference to a message instance (You can get one via: NewMessage()) and that will be populated
-// with a *sqlx.DB instance
 func (c *Client) PreviousMessages() {
-	limit := c.hub.cfg.MaxUnreadMessages
-	chats, err := getUnreadMessages(c.ID, limit, c.db)
-	if err != nil {
-		log.Printf("getUnreadMessages error: %v", err)
+	messages, err := getUnreadMessages(c.Identity, c.hub.cfg.MaxUnreadMessages, c.db)
+	if err != nil || len(messages) == 0 {
 		return
 	}
-
-	// This `if` guard is here because we don't want to send `null` when there are no unread messages
-	if len(chats) > 0 {
-		batchSize := c.hub.cfg.UnreadBatchSize
-		if batchSize <= 0 || batchSize > len(chats) {
-			batchSize = len(chats)
+	batchSize := c.hub.cfg.UnreadBatchSize
+	if batchSize <= 0 || batchSize > len(messages) {
+		batchSize = len(messages)
+	}
+	for start := 0; start < len(messages); start += batchSize {
+		end := start + batchSize
+		if end > len(messages) {
+			end = len(messages)
 		}
-		for i := 0; i < len(chats); i += batchSize {
-			end := i + batchSize
-			if end > len(chats) {
-				end = len(chats)
-			}
-			batch := chats[i:end]
-			messageIDs := make([]string, 0, len(batch))
-			for _, chat := range batch {
-				messageIDs = append(messageIDs, chat.ID)
-			}
-			if ok := c.enqueue(outbound{
-				response:    Response{Messages: batch},
-				markReadIDs: messageIDs,
-			}); !ok {
-				return
-			}
+		if !c.enqueue(outbound{response: Response{Messages: messages[start:end]}}) {
+			return
 		}
 	}
 }
 
-// ShareStatus will send `status` messages to all connected clients that have registered
-// the current client as a contact.
 func (c *Client) ShareStatus(status string) {
-	contacts, err := getContacts(c.ID, c.db)
-	if err == nil {
-		_ = c.hub.queueStatus(statusUpdate{
-			from:     c.ID,
-			status:   status,
-			contacts: contacts,
-		})
+	contacts, err := getContactOwners(c.Identity, c.db)
+	if err != nil {
+		return
 	}
+	_ = c.hub.queueStatus(statusUpdate{from: c.Identity, status: status, contacts: contacts})
 }
 
 func (c *Client) NotifyStatus(status string) {
@@ -242,7 +280,7 @@ func (c *Client) close() {
 			c.cancelSessionValidation()
 		}
 		close(c.done)
-		c.conn.Close()
+		_ = c.conn.Close()
 	})
 }
 

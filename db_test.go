@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,9 +26,7 @@ func newTestDB(t *testing.T) *sqlx.DB {
 	if err := runMigrations(db, filepath.Join("cli", "migrations")); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -53,79 +53,116 @@ func runMigrations(db *sqlx.DB, migrationsPath string) error {
 	return nil
 }
 
-func newMessage(to string) Message {
+func testIdentity(tenant, user string) ClientIdentity {
+	return ClientIdentity{TenantID: tenant, UserID: user}
+}
+
+func testMessage(tenant, from, to, text string) Message {
 	return Message{
-		ID:   uuid.New().String(),
-		From: "sender",
-		To:   to,
-		Text: "hello",
-		Date: time.Now().Unix(),
+		TenantID: tenant, ID: uuid.NewString(), FromUserID: from, ToUserID: to,
+		Text: text, Date: time.Now().UTC().Unix(), Type: FrameTypeMessage,
 	}
 }
 
-func TestChat_insertAndGetUnreadMessages(t *testing.T) {
+func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 	db := newTestDB(t)
-	msg1 := newMessage("user-1")
-	msg2 := newMessage("user-1")
+	sharedID := uuid.NewString()
+	alpha := testMessage("tenant-alpha", "sender", "same-user", "alpha")
+	alpha.ID = sharedID
+	beta := testMessage("tenant-beta", "sender", "same-user", "beta")
+	beta.ID = sharedID
 
-	if err := insert(msg1, db); err != nil {
-		t.Fatalf("insert msg1: %v", err)
+	if _, err := insert(alpha, db); err != nil {
+		t.Fatalf("insert alpha: %v", err)
 	}
-	if err := insert(msg2, db); err != nil {
-		t.Fatalf("insert msg2: %v", err)
+	if _, err := insert(beta, db); err != nil {
+		t.Fatalf("insert beta: %v", err)
 	}
 
-	got, err := getUnreadMessages("user-1", 0, db)
+	alphaUnread, err := getUnreadMessages(testIdentity("tenant-alpha", "same-user"), 0, db)
 	if err != nil {
-		t.Fatalf("getUnreadMessages: %v", err)
+		t.Fatalf("alpha unread: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(got))
+	betaUnread, err := getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	if err != nil {
+		t.Fatalf("beta unread: %v", err)
+	}
+	if len(alphaUnread) != 1 || alphaUnread[0].Text != "alpha" {
+		t.Fatalf("alpha unread = %#v", alphaUnread)
+	}
+	if len(betaUnread) != 1 || betaUnread[0].Text != "beta" {
+		t.Fatalf("beta unread = %#v", betaUnread)
+	}
+
+	if err := markMessagesDelivered(testIdentity("tenant-alpha", "same-user"), []string{sharedID}, db, 1); err != nil {
+		t.Fatalf("mark alpha delivered: %v", err)
+	}
+	alphaUnread, _ = getUnreadMessages(testIdentity("tenant-alpha", "same-user"), 0, db)
+	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	if len(alphaUnread) != 0 || len(betaUnread) != 1 {
+		t.Fatalf("cross-tenant delivery mutation: alpha=%d beta=%d", len(alphaUnread), len(betaUnread))
 	}
 }
 
-func TestMessage_markMessagesAsRead(t *testing.T) {
+func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 	db := newTestDB(t)
-	msg1 := newMessage("user-2")
-	msg2 := newMessage("user-2")
+	message := testMessage("tenant-alpha", "sender", "recipient", "hello")
 
-	if err := insert(msg1, db); err != nil {
-		t.Fatalf("insert msg1: %v", err)
+	first, err := insert(message, db)
+	if err != nil || !first.Created {
+		t.Fatalf("first insert = %#v, %v", first, err)
 	}
-	if err := insert(msg2, db); err != nil {
-		t.Fatalf("insert msg2: %v", err)
+	retry := message
+	retry.Date++
+	second, err := insert(retry, db)
+	if err != nil || second.Created || second.Message.Date != message.Date {
+		t.Fatalf("exact retry = %#v, %v", second, err)
 	}
 
-	if err := markMessagesAsRead([]string{msg1.ID, msg2.ID}, db, 0); err != nil {
-		t.Fatalf("markMessagesAsRead: %v", err)
+	changed := message
+	changed.Text = "changed"
+	if _, err := insert(changed, db); !errors.Is(err, ErrMessageConflict) {
+		t.Fatalf("changed retry error = %v, want %v", err, ErrMessageConflict)
 	}
-
-	got, err := getUnreadMessages("user-2", 0, db)
-	if err != nil {
-		t.Fatalf("getUnreadMessages: %v", err)
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM chats_v2 WHERE tenant_id = ? AND id = ?`, message.TenantID, message.ID); err != nil {
+		t.Fatalf("count rows: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected 0 messages, got %d", len(got))
+	if count != 1 {
+		t.Fatalf("row count = %d, want 1", count)
 	}
 }
 
-func TestMessage_updateStatus(t *testing.T) {
+func TestContacts_AreStableAndTenantScoped(t *testing.T) {
 	db := newTestDB(t)
-	msg := newMessage("user-3")
-
-	if err := insert(msg, db); err != nil {
-		t.Fatalf("insert msg: %v", err)
+	alphaOwner := testIdentity("tenant-alpha", "owner")
+	betaOwner := testIdentity("tenant-beta", "owner")
+	if err := AddContacts(context.Background(), alphaOwner, []string{"shared-contact", "shared-contact", "owner"}, db); err != nil {
+		t.Fatalf("add alpha contacts: %v", err)
+	}
+	if err := AddContacts(context.Background(), betaOwner, []string{"shared-contact"}, db); err != nil {
+		t.Fatalf("add beta contacts: %v", err)
 	}
 
-	if err := updateStatus("user-3", db); err != nil {
-		t.Fatalf("updateStatus: %v", err)
-	}
-
-	got, err := getUnreadMessages("user-3", 0, db)
+	alpha, err := getContactOwners(testIdentity("tenant-alpha", "shared-contact"), db)
 	if err != nil {
-		t.Fatalf("getUnreadMessages: %v", err)
+		t.Fatalf("alpha contact owners: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected 0 messages, got %d", len(got))
+	beta, err := getContactOwners(testIdentity("tenant-beta", "shared-contact"), db)
+	if err != nil {
+		t.Fatalf("beta contact owners: %v", err)
+	}
+	if len(alpha) != 1 || alpha[0] != alphaOwner || len(beta) != 1 || beta[0] != betaOwner {
+		t.Fatalf("owners crossed tenants: alpha=%#v beta=%#v", alpha, beta)
+	}
+}
+
+func TestPersistence_RejectsMissingDatabase(t *testing.T) {
+	message := testMessage("tenant", "sender", "recipient", "hello")
+	if _, err := insert(message, nil); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("insert nil error = %v", err)
+	}
+	if err := markMessagesDelivered(testIdentity("tenant", "recipient"), []string{message.ID}, nil, 1); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("mark nil error = %v", err)
 	}
 }

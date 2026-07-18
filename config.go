@@ -10,24 +10,17 @@ import (
 const (
 	defaultWriteWait      = 10 * time.Second
 	defaultPongWait       = 60 * time.Second
-	defaultMaxMessageSize = 512
+	defaultMaxMessageSize = 16 << 10
 
 	defaultReadBufferSize  = 1024
 	defaultWriteBufferSize = 1024
 
 	defaultClientSendBuffer = 256
 	defaultBroadcastBuffer  = 1024
-	defaultRegisterBuffer   = 256
-	defaultUnregisterBuffer = 256
 	defaultStatusBuffer     = 256
 
 	defaultBroadcastWorkers = 4
 	defaultStatusWorkers    = 2
-
-	defaultPersistBuffer        = 1024
-	defaultPersistWorkers       = 1
-	defaultPersistBatchSize     = 64
-	defaultPersistFlushInterval = 5 * time.Millisecond
 
 	defaultMaxUnreadMessages = 200
 	defaultUnreadBatchSize   = 50
@@ -37,19 +30,12 @@ const (
 )
 
 type HubConfig struct {
-	RegisterBuffer   int
-	UnregisterBuffer int
 	BroadcastBuffer  int
 	StatusBuffer     int
 	ClientSendBuffer int
 
 	BroadcastWorkers int
 	StatusWorkers    int
-
-	PersistBuffer        int
-	PersistWorkers       int
-	PersistBatchSize     int
-	PersistFlushInterval time.Duration
 
 	MaxUnreadMessages int
 	UnreadBatchSize   int
@@ -60,10 +46,10 @@ type HubConfig struct {
 	PingPeriod     time.Duration
 	MaxMessageSize int64
 
-	ReadBufferSize      int
-	WriteBufferSize     int
-	CheckOrigin         func(*http.Request) bool
-	ClientIDFromRequest func(*http.Request) (string, error)
+	ReadBufferSize            int
+	WriteBufferSize           int
+	CheckOrigin               func(*http.Request) bool
+	ClientIdentityFromRequest func(*http.Request) (ClientIdentity, error)
 
 	// ValidateClientSession is called before the websocket upgrade and
 	// periodically for the lifetime of the connection. A validation error
@@ -86,26 +72,20 @@ func DefaultHubConfig() HubConfig {
 		statusWorkers = 1
 	}
 	return HubConfig{
-		RegisterBuffer:       defaultRegisterBuffer,
-		UnregisterBuffer:     defaultUnregisterBuffer,
-		BroadcastBuffer:      defaultBroadcastBuffer,
-		StatusBuffer:         defaultStatusBuffer,
-		ClientSendBuffer:     defaultClientSendBuffer,
-		BroadcastWorkers:     broadcastWorkers,
-		StatusWorkers:        statusWorkers,
-		PersistBuffer:        defaultPersistBuffer,
-		PersistWorkers:       defaultPersistWorkers,
-		PersistBatchSize:     defaultPersistBatchSize,
-		PersistFlushInterval: defaultPersistFlushInterval,
-		MaxUnreadMessages:    defaultMaxUnreadMessages,
-		UnreadBatchSize:      defaultUnreadBatchSize,
-		MarkReadBatch:        defaultMarkReadBatch,
-		WriteWait:            defaultWriteWait,
-		PongWait:             defaultPongWait,
-		PingPeriod:           (defaultPongWait * 9) / 10,
-		MaxMessageSize:       defaultMaxMessageSize,
-		ReadBufferSize:       defaultReadBufferSize,
-		WriteBufferSize:      defaultWriteBufferSize,
+		BroadcastBuffer:   defaultBroadcastBuffer,
+		StatusBuffer:      defaultStatusBuffer,
+		ClientSendBuffer:  defaultClientSendBuffer,
+		BroadcastWorkers:  broadcastWorkers,
+		StatusWorkers:     statusWorkers,
+		MaxUnreadMessages: defaultMaxUnreadMessages,
+		UnreadBatchSize:   defaultUnreadBatchSize,
+		MarkReadBatch:     defaultMarkReadBatch,
+		WriteWait:         defaultWriteWait,
+		PongWait:          defaultPongWait,
+		PingPeriod:        (defaultPongWait * 9) / 10,
+		MaxMessageSize:    defaultMaxMessageSize,
+		ReadBufferSize:    defaultReadBufferSize,
+		WriteBufferSize:   defaultWriteBufferSize,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
@@ -114,12 +94,6 @@ func DefaultHubConfig() HubConfig {
 
 func (cfg HubConfig) withDefaults() HubConfig {
 	def := DefaultHubConfig()
-	if cfg.RegisterBuffer <= 0 {
-		cfg.RegisterBuffer = def.RegisterBuffer
-	}
-	if cfg.UnregisterBuffer <= 0 {
-		cfg.UnregisterBuffer = def.UnregisterBuffer
-	}
 	if cfg.BroadcastBuffer <= 0 {
 		cfg.BroadcastBuffer = def.BroadcastBuffer
 	}
@@ -134,18 +108,6 @@ func (cfg HubConfig) withDefaults() HubConfig {
 	}
 	if cfg.StatusWorkers <= 0 {
 		cfg.StatusWorkers = def.StatusWorkers
-	}
-	if cfg.PersistBuffer <= 0 {
-		cfg.PersistBuffer = def.PersistBuffer
-	}
-	if cfg.PersistWorkers <= 0 {
-		cfg.PersistWorkers = def.PersistWorkers
-	}
-	if cfg.PersistBatchSize <= 0 {
-		cfg.PersistBatchSize = def.PersistBatchSize
-	}
-	if cfg.PersistFlushInterval <= 0 {
-		cfg.PersistFlushInterval = def.PersistFlushInterval
 	}
 	if cfg.MaxUnreadMessages <= 0 {
 		cfg.MaxUnreadMessages = def.MaxUnreadMessages
@@ -176,9 +138,6 @@ func (cfg HubConfig) withDefaults() HubConfig {
 	}
 	if cfg.CheckOrigin == nil {
 		cfg.CheckOrigin = def.CheckOrigin
-	}
-	if cfg.ClientIDFromRequest == nil {
-		cfg.ClientIDFromRequest = def.ClientIDFromRequest
 	}
 	if cfg.ValidateClientSession != nil && cfg.SessionValidationInterval <= 0 {
 		cfg.SessionValidationInterval = defaultSessionValidationInterval

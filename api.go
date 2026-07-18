@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 
@@ -24,27 +25,24 @@ func sessionValidationFailure(err error) (int, int, string) {
 	return http.StatusUnauthorized, websocket.ClosePolicyViolation, ErrUnauthorized.Error()
 }
 
-// serveWs handles websocket requests from the peer. The hub needs to be populated
-// with a *sqlx.DB reference, since we will need to store messages
+// ServeWs upgrades one authenticated, tenant-scoped client. The embedding
+// application must derive ClientIdentity from trusted request state.
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	var clientID string
-	var err error
-	if hub.cfg.ClientIDFromRequest != nil {
-		clientID, err = hub.cfg.ClientIDFromRequest(r)
-		if err != nil {
-			status := http.StatusUnauthorized
-			if errors.Is(err, ErrBadRequest) {
-				status = http.StatusBadRequest
-			}
-			http.Error(w, err.Error(), status)
-			return
-		}
-	} else {
-		// We can change this to JSON instead
-		clientID = r.URL.Query().Get("clientID")
+	if hub == nil || hub.cfg.ClientIdentityFromRequest == nil {
+		http.Error(w, "client identity resolver is required", http.StatusInternalServerError)
+		return
 	}
-	if clientID == "" {
-		http.Error(w, "clientID is required", http.StatusBadRequest)
+	identity, err := hub.cfg.ClientIdentityFromRequest(r)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, ErrBadRequest) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	if err := identity.validate(); err != nil {
+		http.Error(w, ErrUnauthorized.Error(), http.StatusUnauthorized)
 		return
 	}
 	if hub.cfg.ValidateClientSession != nil {
@@ -61,8 +59,6 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Client should have a reference to db, since this is the only way we can inject
-	// the db down there.
 	var sessionContext context.Context
 	var cancelSessionValidation context.CancelFunc
 	if hub.cfg.ValidateClientSession != nil {
@@ -70,7 +66,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	client := &Client{
 		db:                      hub.db,
-		ID:                      clientID,
+		Identity:                identity,
 		hub:                     hub,
 		conn:                    conn,
 		send:                    make(chan outbound, hub.cfg.ClientSendBuffer),
@@ -78,40 +74,55 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		sessionContext:          sessionContext,
 		cancelSessionValidation: cancelSessionValidation,
 	}
-	if ok := client.hub.registerClient(client); !ok {
+	if ok := hub.registerClient(client); !ok {
 		client.close()
 		return
 	}
 
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
 	go client.writePump()
 	go client.readPump()
-
-	// Sending messages that were sent to the client when they were offline
 	client.PreviousMessages()
-
-	// This will broadcast that this client is online to all users who have this client as a contact
 	client.NotifyStatus("online")
 }
 
-// SubmitContacts
-func SubmitContacts(currentUser string, db *sqlx.DB, w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
+type ContactsRequest struct {
+	UserID string `json:"user_id"`
+}
 
+// SubmitContacts is a small HTTP adapter for applications that already
+// resolved contacts to stable user IDs. Applications receiving phone numbers
+// must resolve them in their identity service before calling this function.
+func SubmitContacts(currentUser ClientIdentity, db *sqlx.DB, w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
 	var contacts []ContactsRequest
 	if err := decoder.Decode(&contacts); err != nil {
-		log.Printf("Error in parsing JSON: %v", err)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-
-	areUsers, err := addContactsToDB(currentUser, contacts, db)
-	if err != nil {
-		log.Printf("Error inserting contacts: %v", err)
+	if err := ensureJSONEOF(decoder); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	userIDs := make([]string, 0, len(contacts))
+	for _, contact := range contacts {
+		userIDs = append(userIDs, contact.UserID)
+	}
+	if err := AddContacts(r.Context(), currentUser, userIDs, db); err != nil {
 		http.Error(w, "could not save contacts", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(marshal(contacts))
+}
 
-	_, _ = w.Write(marshal(areUsers))
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return ErrBadRequest
+		}
+		return err
+	}
+	return nil
 }

@@ -1,108 +1,107 @@
 package chat
 
 import (
+	"context"
 	"errors"
-	"log"
+	"fmt"
 
 	"github.com/jmoiron/sqlx"
 )
 
-// Message represents a table of all chat messages that are stored in
-// ws package.
-// We rely on the consumer of the package to provide us with their own database connection client
-// since it doesn't make much since to do that for them.
-type Message struct {
-	ID          string `db:"id" json:"id,omitempty"`
-	From        string `db:"from" json:"from,omitempty"`
-	To          string `db:"to" json:"to,omitempty"`
-	Text        string `db:"text" json:"text,omitempty"`
-	IsDelivered bool   `db:"is_delivered" json:"is_delivered,omitempty"`
-	Date        int64  `db:"date" json:"date"`
-	Type        string `db:"-" json:"type,omitempty"`
-	IsTyping    *bool  `db:"-" json:"is_typing,omitempty"`
+var (
+	ErrMessageConflict        = errors.New("message id conflicts with persisted payload")
+	ErrPersistenceUnavailable = errors.New("chat persistence unavailable")
+)
+
+type persistResult struct {
+	Message Message
+	Created bool
 }
 
-// Contact type represents a relationship between two clients, the relationship reads:
-// `Second` client is a contact of the `First` client, not vice verca. Because person A can have person B
-// in their contact list, but person B may not have A in their contact list. And we don't want to bother B
-// with notifications that A is connected if they don't have A in their contact list.
-type Contact struct {
-	First  string // First client ID
-	Second string // Second client ID
-
-	// Both is the concat of First+Second and its is used in uniquely identifying the pair.
-	Both string
-}
-
-func insert(msg Message, db *sqlx.DB) error {
-	return insertBatch([]Message{msg}, db)
-}
-
-func insertBatch(messages []Message, db *sqlx.DB) error {
-	if db == nil || len(messages) == 0 {
-		return nil
+func insert(message Message, db *sqlx.DB) (persistResult, error) {
+	if db == nil {
+		return persistResult{}, ErrPersistenceUnavailable
 	}
 	tx, err := db.Beginx()
 	if err != nil {
-		log.Printf("insertBatch begin error: %v", err)
-		return err
+		return persistResult{}, err
 	}
-	for _, msg := range messages {
-		if _, err := tx.NamedExec(`INSERT into chats("id", "from", "to", "text", "is_delivered", "date") values(:id, :from, :to, :text, :is_delivered, :date)`, msg); err != nil {
-			_ = tx.Rollback()
-			log.Printf("insertBatch exec error: %v", err)
-			return err
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.NamedExec(`
+		INSERT INTO chats_v2
+			(tenant_id, id, from_user_id, to_user_id, text, is_delivered, date)
+		VALUES
+			(:tenant_id, :id, :from_user_id, :to_user_id, :text, :is_delivered, :date)
+		ON CONFLICT (tenant_id, id) DO NOTHING`, message)
+	if err != nil {
+		return persistResult{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return persistResult{}, err
+	}
+	if rows == 1 {
+		if err := tx.Commit(); err != nil {
+			return persistResult{}, err
 		}
+		return persistResult{Message: message, Created: true}, nil
+	}
+
+	var persisted Message
+	query := tx.Rebind(`
+		SELECT tenant_id, id, from_user_id, to_user_id, text, is_delivered, date
+		FROM chats_v2
+		WHERE tenant_id = ? AND id = ?`)
+	if err := tx.Get(&persisted, query, message.TenantID, message.ID); err != nil {
+		return persistResult{}, err
+	}
+	if persisted.FromUserID != message.FromUserID ||
+		persisted.ToUserID != message.ToUserID ||
+		persisted.Text != message.Text {
+		return persistResult{}, ErrMessageConflict
 	}
 	if err := tx.Commit(); err != nil {
-		log.Printf("insertBatch commit error: %v", err)
-		return err
+		return persistResult{}, err
 	}
-	return nil
+	return persistResult{Message: persisted}, nil
 }
 
-func updateStatus(mobile string, db *sqlx.DB) error {
-	if db == nil {
-		return nil
-	}
-	if _, err := db.Exec(`Update chats set is_delivered = 1 where "to" = $1`, mobile); err != nil {
-		log.Printf("the error is: %v", err)
-		return err
-	}
-	return nil
-}
-
-func getUnreadMessages(mobile string, limit int, db *sqlx.DB) ([]Message, error) {
+func getUnreadMessages(identity ClientIdentity, limit int, db *sqlx.DB) ([]Message, error) {
 	if db == nil {
 		return nil, nil
 	}
-	query := `SELECT * from chats where "to" = ? and is_delivered = 0 order by date`
-	args := []any{mobile}
+	if err := identity.validate(); err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT tenant_id, id, from_user_id, to_user_id, text, is_delivered, date
+		FROM chats_v2
+		WHERE tenant_id = ? AND to_user_id = ? AND is_delivered = FALSE
+		ORDER BY date, id`
+	args := []any{identity.TenantID, identity.UserID}
 	if limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit)
 	}
-	query = db.Rebind(query)
-	var chats []Message
-	if err := db.Select(&chats, query, args...); err != nil {
+	var messages []Message
+	if err := db.Select(&messages, db.Rebind(query), args...); err != nil {
 		return nil, err
 	}
-	return chats, nil
+	for index := range messages {
+		messages[index].Type = FrameTypeMessage
+	}
+	return messages, nil
 }
 
-func markMessageAsRead(messageID string, db *sqlx.DB) error {
+func markMessagesDelivered(identity ClientIdentity, messageIDs []string, db *sqlx.DB, batchSize int) error {
 	if db == nil {
-		return nil
+		return ErrPersistenceUnavailable
 	}
-	if _, err := db.Exec(`Update chats set is_delivered = 1 where "id" = $1`, messageID); err != nil {
-		log.Printf("the error is: %v", err)
+	if err := identity.validate(); err != nil {
 		return err
 	}
-	return nil
-}
-
-func markMessagesAsRead(messageIDs []string, db *sqlx.DB, batchSize int) error {
-	if db == nil || len(messageIDs) == 0 {
+	if len(messageIDs) == 0 {
 		return nil
 	}
 	if batchSize <= 0 {
@@ -113,71 +112,78 @@ func markMessagesAsRead(messageIDs []string, db *sqlx.DB, batchSize int) error {
 		if end > len(messageIDs) {
 			end = len(messageIDs)
 		}
-		batch := messageIDs[start:end]
-		query, args, err := sqlx.In(`Update chats set is_delivered = 1 where "id" IN (?)`, batch)
+		query, args, err := sqlx.In(`
+			UPDATE chats_v2
+			SET is_delivered = TRUE
+			WHERE tenant_id = ? AND to_user_id = ? AND id IN (?)`,
+			identity.TenantID, identity.UserID, messageIDs[start:end])
 		if err != nil {
-			log.Printf("the error is: %v", err)
 			return err
 		}
-		query = db.Rebind(query)
-		if _, err := db.Exec(query, args...); err != nil {
-			log.Printf("the error is: %v", err)
+		if _, err := db.Exec(db.Rebind(query), args...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// addContactsToDB adds a "contact of" relationship between a submitted contact
-// and the currentUser It is important to note that this relationship is not
-// bidirectional, i.e. if A is a contact of B that does not mean B is also a
-// contact of A.
-//
-// Returns which of these contacts are registered users in the database
-func addContactsToDB(currentUser string, contacts []ContactsRequest, db *sqlx.DB) ([]ContactsRequest, error) {
+// AddContacts stores directed, tenant-scoped contact relationships. Identity
+// resolution belongs to the embedding application; this package accepts only
+// stable user IDs and never queries or mirrors an identity user table.
+func AddContacts(ctx context.Context, owner ClientIdentity, contactUserIDs []string, db *sqlx.DB) error {
 	if db == nil {
-		return nil, errors.New("db is nil")
+		return ErrPersistenceUnavailable
 	}
-
-	var user User
-	var contactsThatAreUsers []ContactsRequest
-
-	for _, contact := range contacts {
-		row := db.QueryRow(`SELECT "fullname", "mobile" from users where "mobile" = ?`, contact.Mobile)
-		if err := row.Scan(&user.Name, &user.Mobile); err != nil {
-			log.Printf("Error in query: %v", err)
+	if err := owner.validate(); err != nil {
+		return err
+	}
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	query := tx.Rebind(`
+		INSERT INTO contacts_v2 (tenant_id, owner_user_id, contact_user_id)
+		VALUES (?, ?, ?)
+		ON CONFLICT (tenant_id, owner_user_id, contact_user_id) DO NOTHING`)
+	seen := make(map[string]struct{}, len(contactUserIDs))
+	for _, userID := range contactUserIDs {
+		if !canonicalIdentifier(userID) {
+			return fmt.Errorf("%w: contact user id", ErrInvalidClientIdentity)
+		}
+		if userID == owner.UserID {
 			continue
 		}
-		contactsThatAreUsers = append(contactsThatAreUsers, contact)
-
-		// This is done to prevent duplication by checking if the record already exists
-		both := currentUser + user.Mobile
-		var resultOfBothQuery string
-
-		row = db.QueryRow(`SELECT "both" from contacts where "both" = ?`, both)
-		if err := row.Scan(&resultOfBothQuery); err != nil {
-			log.Printf("%v -> Record can be inserted", err)
-			if _, err := db.Exec(`INSERT into contacts("first", "second", "both") values($1, $2, $3)`, currentUser, user.Mobile, currentUser+user.Mobile); err != nil {
-				log.Printf("Error inserting contact: %v", err)
-				return nil, err
-			}
-		} else {
-			log.Printf("Record already exists: %v", resultOfBothQuery)
+		if _, exists := seen[userID]; exists {
+			continue
+		}
+		seen[userID] = struct{}{}
+		if _, err := tx.ExecContext(ctx, query, owner.TenantID, owner.UserID, userID); err != nil {
+			return err
 		}
 	}
-	return contactsThatAreUsers, nil
+	return tx.Commit()
 }
 
-// getContacts returns a list of user IDs (phone numbers) that have the user with the ID `clientID`
-// as their contact
-func getContacts(clientID string, db *sqlx.DB) ([]string, error) {
+func getContactOwners(identity ClientIdentity, db *sqlx.DB) ([]ClientIdentity, error) {
 	if db == nil {
 		return nil, nil
 	}
-	var contacts []string
-	if err := db.Select(&contacts, `SELECT "first" from contacts where "second" = $1`, clientID); err != nil {
-		log.Printf("Error retrieving contacts: %v", err)
+	if err := identity.validate(); err != nil {
 		return nil, err
 	}
-	return contacts, nil
+	query := db.Rebind(`
+		SELECT owner_user_id
+		FROM contacts_v2
+		WHERE tenant_id = ? AND contact_user_id = ?
+		ORDER BY owner_user_id`)
+	var userIDs []string
+	if err := db.Select(&userIDs, query, identity.TenantID, identity.UserID); err != nil {
+		return nil, err
+	}
+	owners := make([]ClientIdentity, 0, len(userIDs))
+	for _, userID := range userIDs {
+		owners = append(owners, ClientIdentity{TenantID: identity.TenantID, UserID: userID})
+	}
+	return owners, nil
 }

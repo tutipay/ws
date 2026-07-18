@@ -2,7 +2,6 @@ package chat
 
 import (
 	"errors"
-	"log"
 	"sync"
 	"time"
 
@@ -10,35 +9,19 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// Hub maintains the set of active clients and broadcasts messages to the
-// clients.
+// Hub owns tenant-scoped live routing. ClientIdentity is the map key everywhere
+// so equal user IDs in different tenants are independent connections.
 type Hub struct {
 	mu sync.RWMutex
 
-	// Registered clients.
-	clients map[string]*Client // Mapping client IDs to client object
+	clients map[ClientIdentity]*Client
+	typing  map[ClientIdentity]map[ClientIdentity]bool
+	stopped bool
 
-	// Inbound messages from the clients.
 	broadcast chan *Message
+	status    chan statusUpdate
 
-	// Status updates for contacts.
-	status chan statusUpdate
-
-	// Persistence queue for messages.
-	persist chan persistJob
-
-	// Typing state per sender -> recipient.
-	typing map[string]map[string]bool
-
-	// Register requests from the clients.
-	register chan *Client
-
-	// Unregister requests from clients.
-	unregister chan *Client
-
-	// Database reference, we will need to have it down
-	db *sqlx.DB
-
+	db  *sqlx.DB
 	cfg HubConfig
 
 	upgrader websocket.Upgrader
@@ -54,20 +37,13 @@ func NewHub(db *sqlx.DB) *Hub {
 
 func NewHubWithConfig(db *sqlx.DB, cfg HubConfig) *Hub {
 	cfg = cfg.withDefaults()
-	var persist chan persistJob
-	if db != nil && cfg.PersistBuffer > 0 {
-		persist = make(chan persistJob, cfg.PersistBuffer)
-	}
 	return &Hub{
-		broadcast:  make(chan *Message, cfg.BroadcastBuffer),
-		register:   make(chan *Client, cfg.RegisterBuffer),
-		unregister: make(chan *Client, cfg.UnregisterBuffer),
-		status:     make(chan statusUpdate, cfg.StatusBuffer),
-		persist:    persist,
-		clients:    make(map[string]*Client),
-		typing:     make(map[string]map[string]bool),
-		db:         db,
-		cfg:        cfg,
+		broadcast: make(chan *Message, cfg.BroadcastBuffer),
+		status:    make(chan statusUpdate, cfg.StatusBuffer),
+		clients:   make(map[ClientIdentity]*Client),
+		typing:    make(map[ClientIdentity]map[ClientIdentity]bool),
+		db:        db,
+		cfg:       cfg,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  cfg.ReadBufferSize,
 			WriteBufferSize: cfg.WriteBufferSize,
@@ -79,49 +55,54 @@ func NewHubWithConfig(db *sqlx.DB, cfg HubConfig) *Hub {
 
 func (h *Hub) Run() {
 	h.startOnce.Do(func() {
-		for i := 0; i < h.cfg.BroadcastWorkers; i++ {
+		for range h.cfg.BroadcastWorkers {
 			go h.broadcastWorker()
 		}
-		for i := 0; i < h.cfg.StatusWorkers; i++ {
+		for range h.cfg.StatusWorkers {
 			go h.statusWorker()
 		}
-		for i := 0; i < h.cfg.PersistWorkers; i++ {
-			go h.persistWorker()
-		}
 	})
-	for {
-		select {
-		case <-h.done:
-			return
-		case client := <-h.register:
-			h.addClient(client)
-		case client := <-h.unregister:
-			log.Printf("client ID: %s got disconnected", client.ID)
-			h.removeClient(client)
-		}
-	}
+	<-h.done
 }
 
 func (h *Hub) Stop() {
 	h.stopOnce.Do(func() {
+		h.mu.Lock()
+		h.stopped = true
+		clients := make([]*Client, 0, len(h.clients))
+		for _, client := range h.clients {
+			clients = append(clients, client)
+		}
+		h.mu.Unlock()
 		close(h.done)
+		for _, client := range clients {
+			client.close()
+		}
 	})
 }
 
 func (h *Hub) registerClient(client *Client) bool {
-	select {
-	case h.register <- client:
-		return true
-	case <-h.done:
+	var replaced *Client
+	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
 		return false
 	}
+	if existing, ok := h.clients[client.Identity]; ok {
+		replaced = existing
+	}
+	h.clients[client.Identity] = client
+	h.mu.Unlock()
+	if replaced != nil {
+		replaced.markReplaced()
+		h.clearTypingFor(replaced.Identity)
+		replaced.close()
+	}
+	return true
 }
 
 func (h *Hub) unregisterClient(client *Client) {
-	select {
-	case h.unregister <- client:
-	case <-h.done:
-	}
+	h.removeClient(client)
 }
 
 func (h *Hub) broadcastMessage(message *Message) bool {
@@ -149,14 +130,9 @@ func (h *Hub) queueStatus(update statusUpdate) bool {
 }
 
 type statusUpdate struct {
-	from     string
+	from     ClientIdentity
 	status   string
-	contacts []string
-}
-
-type persistJob struct {
-	message Message
-	done    chan error
+	contacts []ClientIdentity
 }
 
 func (h *Hub) broadcastWorker() {
@@ -174,19 +150,13 @@ func (h *Hub) handleBroadcast(message *Message) {
 	if message == nil {
 		return
 	}
-	if message.Type == "typing" {
+	if message.Type == FrameTypeTyping {
 		h.handleTyping(message)
 		return
 	}
-	h.clearTypingBetween(message.From, message.To, true)
-	if client := h.getClient(message.To); client != nil {
-		// We don't need to check for the case of non-existing clients to store the message
-		// in the database to send it to them later when they connect, because we store the
-		// message in the database in `readPump` before we send it through the broadcast channel
-		h.trySend(client, outbound{
-			response:    Response{Messages: []Message{*message}},
-			markReadIDs: []string{message.ID},
-		})
+	h.clearTypingBetween(message.sender(), message.recipient(), true)
+	if client := h.getClient(message.recipient()); client != nil {
+		h.trySend(client, outbound{response: Response{Messages: []Message{*message}}})
 	}
 }
 
@@ -204,171 +174,65 @@ func (h *Hub) statusWorker() {
 func (h *Hub) handleStatus(update statusUpdate) {
 	for _, contact := range update.contacts {
 		if client := h.getClient(contact); client != nil {
-			h.trySend(client, outbound{
-				response: Response{Status: StatusResponse{Mobile: update.from, ConnectionStatus: update.status}},
-			})
+			h.trySend(client, outbound{response: Response{Status: &StatusResponse{
+				UserID: update.from.UserID, ConnectionStatus: update.status,
+			}}})
 		}
 	}
 }
 
-func (h *Hub) persistWorker() {
-	if h.persist == nil {
-		return
-	}
-	batchSize := h.cfg.PersistBatchSize
-	if batchSize <= 0 {
-		batchSize = 1
-	}
-	flushInterval := h.cfg.PersistFlushInterval
-	if flushInterval <= 0 {
-		flushInterval = 5 * time.Millisecond
-	}
-
-	var (
-		batch  []persistJob
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-
-	stopTimer := func() {
-		if timer == nil {
-			return
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timerC = nil
-	}
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		messages := make([]Message, 0, len(batch))
-		for _, job := range batch {
-			messages = append(messages, job.message)
-		}
-		err := insertBatch(messages, h.db)
-		for _, job := range batch {
-			select {
-			case job.done <- err:
-			default:
-			}
-		}
-		batch = batch[:0]
-		stopTimer()
-	}
-
-	for {
-		select {
-		case <-h.done:
-			flush()
-			return
-		case job := <-h.persist:
-			batch = append(batch, job)
-			if len(batch) == 1 {
-				if timer == nil {
-					timer = time.NewTimer(flushInterval)
-				} else {
-					timer.Reset(flushInterval)
-				}
-				timerC = timer.C
-			}
-			if len(batch) >= batchSize {
-				flush()
-			}
-		case <-timerC:
-			flush()
-		}
-	}
-}
-
-func (h *Hub) persistMessage(message Message) error {
-	if h.db == nil {
-		return nil
-	}
-	if h.persist == nil {
+func (h *Hub) persistMessage(message Message) (persistResult, error) {
+	select {
+	case <-h.done:
+		return persistResult{}, errors.New("hub stopped")
+	default:
 		return insert(message, h.db)
-	}
-	job := persistJob{message: message, done: make(chan error, 1)}
-	select {
-	case h.persist <- job:
-	case <-h.done:
-		return errors.New("hub stopped")
-	}
-	select {
-	case err := <-job.done:
-		return err
-	case <-h.done:
-		return errors.New("hub stopped")
-	}
-}
-
-func (h *Hub) addClient(client *Client) {
-	var replaced *Client
-	h.mu.Lock()
-	if existing, ok := h.clients[client.ID]; ok {
-		replaced = existing
-	}
-	h.clients[client.ID] = client
-	h.mu.Unlock()
-
-	if replaced != nil {
-		replaced.markReplaced()
-		h.clearTypingFor(replaced.ID)
-		replaced.close()
 	}
 }
 
 func (h *Hub) removeClient(client *Client) {
 	removed := false
 	h.mu.Lock()
-	if existing, ok := h.clients[client.ID]; ok && existing == client {
-		delete(h.clients, client.ID)
+	if existing, ok := h.clients[client.Identity]; ok && existing == client {
+		delete(h.clients, client.Identity)
 		removed = true
 	}
 	h.mu.Unlock()
 	if removed {
-		h.clearTypingFor(client.ID)
+		h.clearTypingFor(client.Identity)
 	}
 	client.close()
 }
 
-func (h *Hub) getClient(id string) *Client {
+func (h *Hub) getClient(identity ClientIdentity) *Client {
 	h.mu.RLock()
-	client := h.clients[id]
+	client := h.clients[identity]
 	h.mu.RUnlock()
 	return client
 }
 
 func (h *Hub) handleTyping(message *Message) {
-	if message.To == "" || message.From == "" {
+	from := message.sender()
+	to := message.recipient()
+	if from.validate() != nil || to.validate() != nil {
 		return
 	}
 	isTyping := message.IsTyping != nil && *message.IsTyping
-	h.setTyping(message.From, message.To, isTyping)
-	if client := h.getClient(message.To); client != nil {
-		h.trySendDrop(client, outbound{
-			response: Response{Messages: []Message{*message}},
-		})
+	h.setTyping(from, to, isTyping)
+	if client := h.getClient(to); client != nil {
+		h.trySendDrop(client, outbound{response: Response{Messages: []Message{*message}}})
 	}
 }
 
-func (h *Hub) setTyping(from, to string, isTyping bool) {
+func (h *Hub) setTyping(from, to ClientIdentity, isTyping bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.typing == nil {
-		h.typing = make(map[string]map[string]bool)
-	}
 	targets, ok := h.typing[from]
 	if !ok {
 		if !isTyping {
 			return
 		}
-		targets = make(map[string]bool)
+		targets = make(map[ClientIdentity]bool)
 		h.typing[from] = targets
 	}
 	if isTyping {
@@ -381,14 +245,14 @@ func (h *Hub) setTyping(from, to string, isTyping bool) {
 	}
 }
 
-func (h *Hub) clearTypingFor(from string) {
+func (h *Hub) clearTypingFor(from ClientIdentity) {
 	h.mu.Lock()
 	targets, ok := h.typing[from]
 	if !ok {
 		h.mu.Unlock()
 		return
 	}
-	contacts := make([]string, 0, len(targets))
+	contacts := make([]ClientIdentity, 0, len(targets))
 	for to := range targets {
 		contacts = append(contacts, to)
 	}
@@ -399,22 +263,18 @@ func (h *Hub) clearTypingFor(from string) {
 		if client := h.getClient(to); client != nil {
 			isTyping := false
 			message := Message{
-				From:     from,
-				To:       to,
-				Type:     "typing",
-				IsTyping: &isTyping,
-				Date:     time.Now().Unix(),
+				TenantID: from.TenantID, FromUserID: from.UserID, ToUserID: to.UserID,
+				Type: FrameTypeTyping, IsTyping: &isTyping, Date: time.Now().UTC().Unix(),
 			}
 			h.trySendDrop(client, outbound{response: Response{Messages: []Message{message}}})
 		}
 	}
 }
 
-func (h *Hub) clearTypingBetween(from, to string, notify bool) {
+func (h *Hub) clearTypingBetween(from, to ClientIdentity, notify bool) {
 	shouldNotify := false
 	h.mu.Lock()
-	targets, ok := h.typing[from]
-	if ok {
+	if targets, ok := h.typing[from]; ok {
 		if _, ok := targets[to]; ok {
 			delete(targets, to)
 			if len(targets) == 0 {
@@ -430,11 +290,8 @@ func (h *Hub) clearTypingBetween(from, to string, notify bool) {
 	if client := h.getClient(to); client != nil {
 		isTyping := false
 		message := Message{
-			From:     from,
-			To:       to,
-			Type:     "typing",
-			IsTyping: &isTyping,
-			Date:     time.Now().Unix(),
+			TenantID: from.TenantID, FromUserID: from.UserID, ToUserID: to.UserID,
+			Type: FrameTypeTyping, IsTyping: &isTyping, Date: time.Now().UTC().Unix(),
 		}
 		h.trySendDrop(client, outbound{response: Response{Messages: []Message{message}}})
 	}

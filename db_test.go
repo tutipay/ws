@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +104,13 @@ func TestPersistence_TenantScopedUnreadAndDelivery(t *testing.T) {
 	if len(alphaUnread) != 0 || len(betaUnread) != 1 {
 		t.Fatalf("cross-tenant delivery mutation: alpha=%d beta=%d", len(alphaUnread), len(betaUnread))
 	}
+	if err := markMessagesDelivered(testIdentity("tenant-beta", "different-user"), []string{sharedID}, db, 1); err != nil {
+		t.Fatalf("mark foreign recipient delivered: %v", err)
+	}
+	betaUnread, _ = getUnreadMessages(testIdentity("tenant-beta", "same-user"), 0, db)
+	if len(betaUnread) != 1 {
+		t.Fatalf("foreign recipient marked message delivered: %#v", betaUnread)
+	}
 }
 
 func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
@@ -119,10 +128,16 @@ func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 		t.Fatalf("exact retry = %#v, %v", second, err)
 	}
 
-	changed := message
-	changed.Text = "changed"
-	if _, err := insert(changed, db); !errors.Is(err, ErrMessageConflict) {
-		t.Fatalf("changed retry error = %v, want %v", err, ErrMessageConflict)
+	changedText := message
+	changedText.Text = "changed"
+	changedRecipient := message
+	changedRecipient.ToUserID = "other-recipient"
+	changedSender := message
+	changedSender.FromUserID = "other-sender"
+	for _, changed := range []Message{changedText, changedRecipient, changedSender} {
+		if _, err := insert(changed, db); !errors.Is(err, ErrMessageConflict) {
+			t.Fatalf("changed retry %#v error = %v, want %v", changed, err, ErrMessageConflict)
+		}
 	}
 	var count int
 	if err := db.Get(&count, `SELECT count(*) FROM chats_v2 WHERE tenant_id = ? AND id = ?`, message.TenantID, message.ID); err != nil {
@@ -130,6 +145,43 @@ func TestPersistence_IdempotencyAndPayloadConflict(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
+	}
+}
+
+func TestPersistence_ConcurrentExactRetryCreatesOneRow(t *testing.T) {
+	db := newTestDB(t)
+	message := testMessage("tenant", "sender", "recipient", "hello")
+	const callers = 16
+	start := make(chan struct{})
+	var created atomic.Int32
+	errorsSeen := make(chan error, callers)
+	var workers sync.WaitGroup
+	for range callers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			result, err := insert(message, db)
+			if err == nil && result.Created {
+				created.Add(1)
+			}
+			errorsSeen <- err
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatalf("concurrent insert: %v", err)
+		}
+	}
+	if created.Load() != 1 {
+		t.Fatalf("created count = %d, want 1", created.Load())
+	}
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM chats_v2 WHERE tenant_id = ? AND id = ?`, message.TenantID, message.ID); err != nil || count != 1 {
+		t.Fatalf("persisted count = %d, error = %v", count, err)
 	}
 }
 

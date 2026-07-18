@@ -249,6 +249,53 @@ func TestServeWs_ExactRetryAndChangedPayloadConflict(t *testing.T) {
 	assertNoFrame(t, recipient)
 }
 
+func TestServeWs_ExactRetryBeforeRecipientAckRedeliversOnePersistedRow(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
+	id := uuid.NewString()
+
+	for range 2 {
+		sendMessage(t, sender, id, "recipient", "safe-redelivery")
+		requireAck(t, readResponse(t, sender), AckKindPersisted, id)
+		requireMessage(t, readResponse(t, recipient), id, "sender", "recipient", "safe-redelivery")
+	}
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM chats_v2 WHERE tenant_id = ? AND id = ?`, "tenant", id); err != nil || count != 1 {
+		t.Fatalf("persisted count = %d, error = %v", count, err)
+	}
+}
+
+func TestServeWs_MessageFailsClosedWithoutPersistence(t *testing.T) {
+	_, wsURL := newSocketServer(t, nil, nil)
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
+	recipient := dialIdentity(t, wsURL, testIdentity("tenant", "recipient"))
+	id := uuid.NewString()
+	sendMessage(t, sender, id, "recipient", "must-not-be-ephemeral")
+	response := readResponse(t, sender)
+	if response.Error == nil || response.Error.Code != "persistence_unavailable" || response.Error.MessageID != id {
+		t.Fatalf("missing persistence response = %#v", response)
+	}
+	assertNoFrame(t, recipient)
+}
+
+func TestServeWs_RejectsNonCanonicalMessageID(t *testing.T) {
+	db := newTestDB(t)
+	_, wsURL := newSocketServer(t, db, nil)
+	sender := dialIdentity(t, wsURL, testIdentity("tenant", "sender"))
+	uppercaseID := strings.ToUpper(uuid.NewString())
+	sendMessage(t, sender, uppercaseID, "recipient", "invalid-id")
+	response := readResponse(t, sender)
+	if response.Error == nil || response.Error.Code != "bad_frame" {
+		t.Fatalf("non-canonical UUID response = %#v", response)
+	}
+	var count int
+	if err := db.Get(&count, `SELECT count(*) FROM chats_v2`); err != nil || count != 0 {
+		t.Fatalf("non-canonical UUID persisted: count=%d error=%v", count, err)
+	}
+}
+
 func TestServeWs_OfflineBacklogRemainsUntilAck(t *testing.T) {
 	db := newTestDB(t)
 	_, wsURL := newSocketServer(t, db, nil)

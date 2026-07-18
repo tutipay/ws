@@ -23,8 +23,8 @@ var ErrInvalidClientIdentity = errors.New("invalid client identity")
 // It must be derived by the server; neither field is accepted from websocket
 // frames.
 type ClientIdentity struct {
-	TenantID string
-	UserID   string
+	TenantID string `json:"-"`
+	UserID   string `json:"-"`
 }
 
 func (identity ClientIdentity) validate() error {

@@ -27,7 +27,7 @@
           conn.send(msg.value);
           var value = JSON.parse(msg.value)
           var item = document.createElement("div");
-          item.innerText = `[Your ID:${clientID}] Sent: ${value.text}`;
+          item.innerText = `[Your ID:${userID}] Sent: ${value.text}`;
           appendLog(item);
           msg.value = "";
           return false;
@@ -35,12 +35,12 @@
 
         let queryParams = new URLSearchParams(window.location.search);
 
-        let clientID = queryParams.get("clientID");
-        console.log("cliendID is: ", clientID);
+        let tenantID = queryParams.get("tenantID");
+        let userID = queryParams.get("userID");
 
         if (window["WebSocket"]) {
           conn = new WebSocket(
-            `ws://${document.location.host}/ws?clientID=${clientID}`
+            `ws://${document.location.host}/ws?tenantID=${tenantID}&userID=${userID}`
           );
           conn.onclose = function (evt) {
             var item = document.createElement("div");
@@ -48,13 +48,19 @@
             appendLog(item);
           };
           conn.onmessage = function (evt) {
-            var messages = JSON.parse(evt.data)
-            console.log(messages)
-            for (var i = 0; i < messages.length; i++) {
+            var response = JSON.parse(evt.data)
+            var delivered = [];
+            for (var i = 0; i < (response.messages || []).length; i++) {
               var item = document.createElement("div");
-              item.innerText = messages[i].text;
-              item.innerText = `[From:${messages[i].from}] Rcvd: ${item.innerText}`;
+              item.innerText = response.messages[i].text;
+              item.innerText = `[From:${response.messages[i].from_user_id}] Rcvd: ${item.innerText}`;
               appendLog(item);
+              if (response.messages[i].type === "message") {
+                delivered.push(response.messages[i].id);
+              }
+            }
+            if (delivered.length > 0) {
+              conn.send(JSON.stringify({type: "ack", message_ids: delivered}));
             }
           };
         } else {

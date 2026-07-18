@@ -1,83 +1,111 @@
-# WS an open source peer to peer chat library
+# WS
 
-This is still a WIP, expect lots of breaking changes as we are live-experimenting with the API. WS uses gorilla's websocket lib to facilitate a simple chat client library that can be used to support:
+WS is a small tenant-scoped WebSocket chat library for Go. It provides direct
+messages, typing and presence events, durable offline delivery, idempotent
+client retries, and periodic session validation.
 
-- realtime peer to peer messaging with ID's (currently, we assume a mobile number, or username as an ID)
-- backup for chat messages so that messages will be available even if one client is disconnected
+## Security model
 
-## Roadmap
+Every connection has a server-derived `ClientIdentity{TenantID, UserID}`. The
+embedding application must populate `ClientIdentityFromRequest` from trusted
+authentication state; query parameters and client frames are not identities.
+Tenant ID never appears in a client frame, and sender, time, and delivery state
+are always authored by the server.
 
-- [x] Implement peer to peer chatting
-- [x] Add support to backup messages when a client is not connected
-- [ ] Allow to specify which messages to retrieve, currently we retrieve all of the messages that they were not delivered
-- [ ] Add support to push notifications, the idea is to provide API such that a user can hook it up with their current firebase or OneSignal credentials. This can be useful in cases of not both chat audience are connected at the same moment. 
-
-
-### How to use ws
-
-ws is built with net/http, even for our use cases that was not exactly useful, since we were using gin (noebs). However, you still can use ws even if your http library is not go's stdlib. The way for that is by writing a simple adapter that leverages http.HandlerFunc (which is shared amongst all of them)
-
-- Example for gin. This will allow you to use a net/http handler in your gin router, with the help of gin.HandlerFun and `c *gin.Context`
-
-``` go
-func previousMessagesAdapter(msg chat.Hub) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		chat.PreviousMessages(msg, c.Writer, c.Request)
+```go
+cfg := chat.DefaultHubConfig()
+cfg.ClientIdentityFromRequest = func(r *http.Request) (chat.ClientIdentity, error) {
+	identity, ok := trustedIdentityFromContext(r.Context())
+	if !ok {
+		return chat.ClientIdentity{}, chat.ErrUnauthorized
 	}
+	return chat.ClientIdentity{
+		TenantID: identity.TenantID,
+		UserID:   identity.UserID,
+	}, nil
 }
+
+hub := chat.NewHubWithConfig(db, cfg)
+go hub.Run()
+defer hub.Stop()
+
+http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	chat.ServeWs(hub, w, r)
+})
 ```
 
-### How to serve web socket connections
+`ServeWs` fails closed when no identity resolver is configured. Applications
+may also set `ValidateClientSession`; it runs before upgrade and periodically
+for the life of each socket.
 
-Let's use nginx example, you can find better docs for other web servers.
+## Wire protocol
 
-```nginx
-location /ws {
-     proxy_pass http://localhost:6662/ws;
-     proxy_http_version 1.1;
-     proxy_set_header Upgrade $http_upgrade;
-     proxy_set_header Connection "Upgrade";
-     proxy_set_header Host $host;
-}
-```
-This might not be needed, since we do in `ServeWs` endpoint.
+The client creates and durably stores a canonical lowercase UUID before its
+first send:
 
-### Notes about the database
-
-There's no simple way of using a database.
-
-
-## We are using the awesome migrate library
-
-Just to make our life's easier, we are using the awesome migrate library. You can download simply by `go install`, using
-```bash
-go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+```json
+{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","to_user_id":"42","text":"hello"}
 ```
 
-And then run the command 
+After persistence the sender receives:
 
-```bash
-migrate -path migrations/ -database sqlite3://test.db up
+```json
+{"ack":{"kind":"persisted","message_ids":["5213f8b6-9c56-4ca4-88bb-e114405194a9"]}}
 ```
 
-And the directory tree is like the following:
+The recipient receives a server-authored message:
 
-```
-.
-├── cli
-├── home.html
-├── main.go
-├── migrate_test.go
-├── migrations
-│   ├── 000001_create_chats_table.down.sqlite3
-│   ├── 000001_create_chats_table.up.sqlite3
-│   ├── 000002_add_date_chats.down.sqlite3
-│   └── 000002_add_date_chats.up.sqlite3
-└── test.db
+```json
+{"messages":[{"type":"message","id":"5213f8b6-9c56-4ca4-88bb-e114405194a9","from_user_id":"41","to_user_id":"42","text":"hello","date":1784450000}]}
 ```
 
-### How to create database migrations
+Only after writing that message to durable client storage should the recipient
+acknowledge it:
 
-```shell
-$ migrate create -ext sqlite3 -dir migrations -seq add_date_chats
+```json
+{"type":"ack","message_ids":["5213f8b6-9c56-4ca4-88bb-e114405194a9"]}
 ```
+
+The server then returns a `delivered` acknowledgement. Until this application
+ack arrives, the message remains in the offline backlog. Clients must UPSERT by
+message ID because a disconnect can cause a safe re-delivery.
+
+Typing is transient and scoped to the sender's authenticated tenant:
+
+```json
+{"type":"typing","to_user_id":"42","is_typing":true}
+```
+
+Unknown fields are rejected. In particular, clients cannot submit `tenant_id`,
+`from_user_id`, `date`, or `is_delivered`. An exact retry of a persisted message
+ID is acknowledged without creating another row; changing its recipient or
+text returns `message_conflict`.
+
+## Persistence
+
+The embedding database must provide the equivalent of the additive SQLite
+migration in `cli/migrations/000005_create_tenant_scoped_chat.up.sqlite3`:
+
+- `chats_v2`, primary key `(tenant_id, id)` and unread index
+  `(tenant_id, to_user_id, is_delivered, date, id)`;
+- `contacts_v2`, primary key
+  `(tenant_id, owner_user_id, contact_user_id)` and the reverse presence index.
+
+Legacy mobile-only rows must not be inferred into a tenant. Leave them
+quarantined or migrate them only from an authoritative tenant/user mapping.
+
+Identity lookup is intentionally outside this package. Resolve address-book
+entries in the owning identity service, then call `AddContacts` with stable user
+IDs. `SubmitContacts` is only an adapter for already-resolved `user_id` values;
+it never queries or mirrors an identity `users` table.
+
+## Migrating from v0.1
+
+- Replace `ClientIDFromRequest` with `ClientIdentityFromRequest`.
+- Replace mobile/string client IDs with `ClientIdentity`.
+- Send `to_user_id`, not `to`, and provide a canonical UUID `id`.
+- Read messages from the `Response.messages` envelope using `from_user_id` and
+  `to_user_id`.
+- Persist received messages before sending an ACK.
+- Replace mobile-keyed `chats`/`contacts` queries with the tenant-scoped v2
+  schema. Do not backfill ambiguous legacy rows.
